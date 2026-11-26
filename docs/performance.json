@@ -1,0 +1,26 @@
+{
+  "device": "Android 16 / API 36 x86_64, 720x1280, 2 vCPU",
+  "mixedHistory": {
+    "frames": 120,
+    "p50_ms": 22.622015,
+    "p95_ms": 40.255596,
+    "max_ms": 51.466264,
+    "frozen_frames_700ms": 0,
+    "gestures": "12 real adb swipes, ordinary Activity launch with system frame clock",
+    "fixtureMessages": 80,
+    "build": "signed debug 0.2.0-dev, ART speed, shared Markdown engine initialized off main thread",
+    "ui_work_p95_ms": 13.577313,
+    "draw_p95_ms": 4.712528,
+    "vsync_delay_p95_ms": 0.0
+  },
+  "productionRelease": {
+    "frames": 120,
+    "p50_ms": 14.936799,
+    "p95_ms": 24.788924,
+    "max_ms": 34.169373,
+    "frozen_frames_700ms": 0,
+    "gestures": "12 real adb swipes, ordinary Activity launch with system frame clock",
+    "build": "production signed R8 release 0.2.0, online arithmetic and formula result, ART speed"
+  },
+  "limitations": "Software emulator measurements; no physical Xiaomi validation or guaranteed 60fps."
+}

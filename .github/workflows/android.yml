@@ -1,0 +1,123 @@
+name: Android
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]*', '[0-9]*.[0-9]*.[0-9]*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号，例如 0.1.0'
+        required: true
+        default: '0.2.0'
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: android-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
+      - uses: gradle/actions/setup-gradle@v4
+      - run: ./gradlew testDebugUnitTest lintDebug assembleDebug --console=plain
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Enable emulator acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Emulator UI tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: ./gradlew connectedDebugAndroidTest --console=plain
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification
+          path: |
+            app/build/reports/
+            app/build/outputs/androidTest-results/
+  release:
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions: {contents: write}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Resolve version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os,re
+          ref=os.environ['GITHUB_REF_NAME']
+          version=ref.removeprefix('v') if os.environ['GITHUB_REF'].startswith('refs/tags/') else os.environ.get('INPUT_VERSION') or '0.2.0'
+          if not re.fullmatch(r'\d+\.\d+\.\d+',version): raise SystemExit('Version must use major.minor.patch')
+          tag=ref if os.environ['GITHUB_REF'].startswith('refs/tags/') else 'v'+version
+          # One workflow counter spans main/tag/manual runs without same-second collisions.
+          code=1000001000+int(os.environ['GITHUB_RUN_NUMBER'])
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              f.write(f'RELEASE_VERSION={version}\nRELEASE_CODE={code}\nRELEASE_TAG={tag}\n')
+          PY
+      - name: Guard immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'Release already exists; select a new version.' >&2
+            exit 1
+          fi
+      - name: Restore signing key
+        env:
+          KEYSTORE: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$KEYSTORE"
+          printf '%s' "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/xiaoli.jks"
+      - name: Build signed APK
+        env:
+          XIAOLI_KEYSTORE: ${{ runner.temp }}/xiaoli.jks
+          XIAOLI_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease -PversionName="$RELEASE_VERSION" -PversionCode="$RELEASE_CODE" --console=plain
+          cp app/build/outputs/apk/release/app-release.apk xiaoli.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs xiaoli.apk
+      - name: Publish to Pgyer
+        env:
+          PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
+        run: python3 scripts/publish_pgyer.py xiaoli.apk --notes "小李 $RELEASE_VERSION" --output pgyer.json
+      - name: Create update manifest
+        run: |
+          python3 scripts/release_manifest.py xiaoli.apk --version "$RELEASE_VERSION" --code "$RELEASE_CODE" --tag "$RELEASE_TAG" --pgyer "$(python3 -c 'import json;print(json.load(open("pgyer.json"))["url"])')"
+          sha256sum xiaoli.apk > xiaoli.apk.sha256
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'Release already exists; use a new version to preserve immutable updates.' >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" xiaoli.apk update.json xiaoli.apk.sha256 --target "$GITHUB_SHA" --title "小李 $RELEASE_VERSION" --notes "新增飞书智能体登录、选择和内嵌对话。蒲公英地址见 update.json。"
+      - uses: actions/upload-artifact@v4
+        with: {name: signed-release, path: 'xiaoli.apk'}
+      - name: Remove signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/xiaoli.jks"
