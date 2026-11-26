@@ -67,7 +67,9 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           python3 - <<'PY'
-          import os,re
+          import os,re,sys
+          sys.path.insert(0, 'scripts')
+          from release_manifest import RELEASE_NOTES
           ref=os.environ['GITHUB_REF_NAME']
           version=ref.removeprefix('v') if os.environ['GITHUB_REF'].startswith('refs/tags/') else os.environ.get('INPUT_VERSION') or '0.2.0'
           if not re.fullmatch(r'\d+\.\d+\.\d+',version): raise SystemExit('Version must use major.minor.patch')
@@ -75,6 +77,7 @@ jobs:
           # One workflow counter spans main/tag/manual runs without same-second collisions.
           code=1000001000+int(os.environ['GITHUB_RUN_NUMBER'])
           with open(os.environ['GITHUB_ENV'],'a') as f:
+              f.write(f'RELEASE_NOTES={RELEASE_NOTES}\n')
               f.write(f'RELEASE_VERSION={version}\nRELEASE_CODE={code}\nRELEASE_TAG={tag}\n')
           PY
       - name: Guard immutable release
@@ -102,7 +105,7 @@ jobs:
       - name: Publish to Pgyer
         env:
           PGYER_API_KEY: ${{ secrets.PGYER_API_KEY }}
-        run: python3 scripts/publish_pgyer.py xiaoli.apk --notes "小李 $RELEASE_VERSION" --output pgyer.json
+        run: python3 scripts/publish_pgyer.py xiaoli.apk --notes "$RELEASE_NOTES" --output pgyer.json
       - name: Create update manifest
         run: |
           python3 scripts/release_manifest.py xiaoli.apk --version "$RELEASE_VERSION" --code "$RELEASE_CODE" --tag "$RELEASE_TAG" --pgyer "$(python3 -c 'import json;print(json.load(open("pgyer.json"))["url"])')"
@@ -115,7 +118,7 @@ jobs:
             echo 'Release already exists; use a new version to preserve immutable updates.' >&2
             exit 1
           fi
-          gh release create "$RELEASE_TAG" xiaoli.apk update.json xiaoli.apk.sha256 --target "$GITHUB_SHA" --title "小李 $RELEASE_VERSION" --notes "新增飞书智能体登录、选择和内嵌对话。蒲公英地址见 update.json。"
+          gh release create "$RELEASE_TAG" xiaoli.apk update.json xiaoli.apk.sha256 --target "$GITHUB_SHA" --title "小李 $RELEASE_VERSION" --notes "$RELEASE_NOTES"
       - uses: actions/upload-artifact@v4
         with: {name: signed-release, path: 'xiaoli.apk'}
       - name: Remove signing material

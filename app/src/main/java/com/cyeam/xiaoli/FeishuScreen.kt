@@ -21,9 +21,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 @Composable
 internal fun FeishuScreen(onExit: () -> Unit) {
     val context = LocalContext.current
-    val vault = remember { Credentials(context) }
+    val vault = remember { FeishuChannelStore(context) }
     // Most recently selected channel is first. A single encrypted write keeps selection and list consistent.
-    var channels by remember { mutableStateOf(decodeChannels(vault.readSecret("feishu.channels"))) }
+    var channels by remember { mutableStateOf(vault.read()) }
     var choosing by rememberSaveable { mutableStateOf(channels.isEmpty()) }
     var signingIn by rememberSaveable { mutableStateOf(channels.isEmpty()) }
     var adding by rememberSaveable { mutableStateOf(false) }
@@ -34,7 +34,7 @@ internal fun FeishuScreen(onExit: () -> Unit) {
     var panel by remember { mutableStateOf<FeishuPanel?>(null) }
     val links = LocalUriHandler.current
     fun save(updated: List<FeishuChannel>): Boolean = runCatching {
-        vault.saveSecret("feishu.channels", encodeChannels(updated))
+        vault.save(updated)
         channels = updated
     }.onFailure { error = "无法保存智能体，请检查设备存储后重试。" }.isSuccess
     fun select(item: FeishuChannel) {
@@ -51,7 +51,6 @@ internal fun FeishuScreen(onExit: () -> Unit) {
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = onExit) { Text("返回小李") }
                 Text(if (signingIn) "飞书登录" else if (choosing) "飞书智能体" else channels.first().name,
                     Modifier.weight(1f), maxLines = 1, style = MaterialTheme.typography.titleMedium)
                 if (signingIn) {
