@@ -22,6 +22,8 @@ class FeishuApplication : Application() {
 }
 
 class MainActivity : ComponentActivity() {
+    internal val media = ChatMedia(this)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Only restore navigation state written by the Feishu-only client.
         super.onCreate(savedInstanceState?.takeIf { it.getBoolean("feishuOnly") })
@@ -31,7 +33,7 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-                FeishuScreen(onExit = ::finish)
+                FeishuScreen(media, onExit = ::finish)
             }
         }
     }

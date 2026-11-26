@@ -19,7 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 
 @Composable
-internal fun FeishuScreen(onExit: () -> Unit) {
+internal fun FeishuScreen(media: ChatMedia, onExit: () -> Unit) {
     val context = LocalContext.current
     val vault = remember { FeishuChannelStore(context) }
     // Most recently selected channel is first. A single encrypted write keeps selection and list consistent.
@@ -56,6 +56,7 @@ internal fun FeishuScreen(onExit: () -> Unit) {
                 if (signingIn) {
                     TextButton(onClick = { signingIn = false }) { Text("选择智能体") }
                 } else if (!choosing) {
+                    TextButton(onClick = { panel?.let(media::shareLocation) }) { Text("位置") }
                     TextButton(onClick = { reload++ }) { Text("重新加载") }
                     TextButton(onClick = { choosing = true }) { Text("切换") }
                 }
@@ -88,7 +89,7 @@ internal fun FeishuScreen(onExit: () -> Unit) {
                 }
             } else {
                 key(channels.first().token, reload) {
-                    AndroidView(factory = { FeishuPanel(it, channels.first()).also { view -> panel = view } },
+                    AndroidView(factory = { FeishuPanel(it, channels.first(), media).also { view -> panel = view } },
                         modifier = Modifier.fillMaxSize(), onRelease = { view ->
                             if (panel === view) panel = null
                             view.close()

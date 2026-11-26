@@ -16,7 +16,7 @@ import android.widget.FrameLayout
 import java.io.ByteArrayInputStream
 
 /** Web SDK host. Sign-in windows share WebView cookies with the embedded Feishu frame. */
-internal class FeishuPanel(context: Context, private val channel: FeishuChannel?, private val onReturnFromLogin: () -> Unit = {}) : FrameLayout(context) {
+internal class FeishuPanel(context: Context, private val channel: FeishuChannel?, private val media: ChatMedia? = null, private val onReturnFromLogin: () -> Unit = {}) : FrameLayout(context) {
     private val origin = "https://$FEISHU_PANEL_HOST"
     private val home = "$origin/panel.html"
     private var visitedPassport = false
@@ -52,7 +52,7 @@ internal class FeishuPanel(context: Context, private val channel: FeishuChannel?
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun browser(): WebView = WebView(context).apply {
+    private fun browser(fromGesture: Boolean = false): WebView = WebView(context).apply {
         layoutParams = LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
@@ -60,7 +60,11 @@ internal class FeishuPanel(context: Context, private val channel: FeishuChannel?
         settings.allowContentAccess = false
         settings.setSupportMultipleWindows(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+        var popupGesture = fromGesture
         webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                media?.pageChanged(view)
+            }
             override fun onPageFinished(view: WebView, url: String) {
                 if (channel != null) return
                 val host = Uri.parse(url).host
@@ -72,14 +76,44 @@ internal class FeishuPanel(context: Context, private val channel: FeishuChannel?
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest) = localAsset(request.url)
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                if (!request.isForMainFrame) return request.url.scheme !in setOf("https", "about", "blob")
-                return request.url.toString() != home && !isFeishu(request.url) && request.url.toString() != "about:blank"
+                if (!request.isForMainFrame) {
+                    if (request.hasGesture() && media != null &&
+                        (request.url.scheme == "geo" || (request.url.scheme == "https" && !isFeishu(request.url)))) {
+                        media.openLink(request.url)
+                        return true
+                    }
+                    return request.url.scheme !in setOf("https", "about", "blob")
+                }
+                val uri = request.url
+                val userAction = request.hasGesture() || popupGesture
+                if (uri.toString() == "about:blank") return false
+                popupGesture = false
+                if (uri.toString() == home || isFeishu(uri)) return false
+                if (userAction && media != null && uri.scheme in listOf("https", "geo")) {
+                    media.openLink(uri)
+                    if (this@FeishuPanel.indexOfChild(view) > 0) view.post {
+                        if (view.parent === this@FeishuPanel) dispose(view)
+                    }
+                }
+                return true
             }
         }
+        val owner = this
+        media?.attach(owner)
         webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(view: WebView, callback: android.webkit.ValueCallback<Array<Uri>>, params: FileChooserParams): Boolean =
+                media?.choose(view, callback, params) ?: false
+
+            override fun onPermissionRequest(request: android.webkit.PermissionRequest) {
+                media?.requestMic(owner, request) ?: request.deny()
+            }
+            override fun onPermissionRequestCanceled(request: android.webkit.PermissionRequest) {
+                media?.cancelMic(request)
+            }
+
             override fun onCreateWindow(view: WebView, dialog: Boolean, userGesture: Boolean, result: Message): Boolean {
                 if (!userGesture || this@FeishuPanel.childCount >= 3) return false
-                val popup = browser()
+                val popup = browser(fromGesture = true)
                 this@FeishuPanel.addView(popup)
                 (result.obj as WebView.WebViewTransport).webView = popup
                 result.sendToTarget()
@@ -92,6 +126,7 @@ internal class FeishuPanel(context: Context, private val channel: FeishuChannel?
     }
 
     private fun dispose(view: WebView) {
+        media?.detach(view)
         removeView(view)
         view.stopLoading()
         view.webChromeClient = null
@@ -106,6 +141,7 @@ internal class FeishuPanel(context: Context, private val channel: FeishuChannel?
     }
 
     fun close() {
+        media?.closePanel(this)
         while (childCount > 0) dispose(getChildAt(childCount - 1) as WebView)
         CookieManager.getInstance().flush()
     }
