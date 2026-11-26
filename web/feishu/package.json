@@ -1,0 +1,9 @@
+{
+  "name": "xiaoli-feishu-panel",
+  "private": true,
+  "scripts": {
+    "build": "esbuild panel.js --bundle --minify --target=chrome80 --outfile=../../app/src/main/assets/feishu/panel.js --legal-comments=eof"
+  },
+  "dependencies": { "@lark-apaas/aily-web-sdk": "0.0.12" },
+  "devDependencies": { "esbuild": "0.25.12" }
+}
