@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-RELEASE_NOTES = '新增启动更新提醒。登录首页和智能体选择页可手动检查更新。使用 0.0.7 或更早版本的用户，请先从蒲公英覆盖安装带提醒的版本。'
+RELEASE_NOTES = '支持使用飞书或 Lark 登录，选择已有智能体单聊。小李直接收发消息、图片、文件、文档、语音和位置链接。升级后请重新授权。'
 
 def make_manifest(apk, version, code, tag, pgyer):
     return {'versionName':version,'versionCode':int(code),'apkUrl':f'https://github.com/mnhkahn/xiaoli-droid/releases/download/{tag}/xiaoli.apk','sha256':hashlib.sha256(apk.read_bytes()).hexdigest(),'pgyerUrl':pgyer,'notes':RELEASE_NOTES}
