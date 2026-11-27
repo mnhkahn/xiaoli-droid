@@ -17,6 +17,8 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.ByteArrayInputStream
@@ -72,6 +74,13 @@ class ChatMediaTest {
                     else handler.cancel()
                 }
                 override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest) = production.shouldOverrideUrlLoading(v, r)
+            }
+            // The normal chat screen uses safeDrawingPadding. Keep the test WebView touchable
+            // below the status bar and display cutout on edge-to-edge devices as well.
+            ViewCompat.setOnApplyWindowInsetsListener(panel) { host, insets ->
+                val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+                host.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+                insets
             }
             it.setContentView(panel)
             view.reload()

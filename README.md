@@ -37,11 +37,11 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 
 仓库 Secrets：`RELEASE_KEYSTORE_BASE64`、`RELEASE_STORE_PASSWORD`、`PGYER_API_KEY`。发布证书 alias 为 `xiaoli`，首次生成后必须保存，后续所有发布复用。
 
-- 推送 main：跑单测、Lint 和模拟器 UI 测试。
-- 推送 `v0.2.0` 或 `0.2.0` 形式的 Tag：同样验证后签名、上传蒲公英并发布稳定版。
-- Actions 手动运行：填写 `major.minor.patch` 版本。
+- 推送 main 或创建拉取请求会运行 `Android CI`，执行单测、Lint 和模拟器 UI 测试。
+- 推送 `v0.2.0` 或 `0.2.0` 形式的标签会运行 `Android Release`，通过同一套验证后签名、上传蒲公英并发布 GitHub Release。
+- 手动运行 `Android Release` 时填写 `major.minor.patch` 版本。
 
-Release 包含 `xiaoli.apk`、SHA-256 和 `update.json`。versionCode 使用固定基数 1000001000 加当前工作流的 GITHUB_RUN_NUMBER，在 main、Tag 和手动运行间递增，为本机验证包保留低位编号，并避免同秒发布的版本冲突。每个 Release 只创建一次，重发请使用新版本。
+Release 包含 `xiaoli.apk`、SHA-256 和 `update.json`。versionCode 使用固定基数 1000001000 加发布工作流的 GITHUB_RUN_NUMBER，随版本标签和手动发布运行递增，为本机验证包保留低位编号，并避免同秒发布的版本冲突。每个 Release 只创建一次，重发请使用新版本。
 
 本机签名材料存放在 `~/.config/xiaoli-droid/signing/`，不进入仓库。构建正式版：
 
