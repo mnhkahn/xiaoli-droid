@@ -33,6 +33,8 @@ internal fun FeishuScreen(media: ChatMedia, onExit: () -> Unit) {
     var error by remember { mutableStateOf("") }
     var reload by remember { mutableIntStateOf(0) }
     var panel by remember { mutableStateOf<FeishuPanel?>(null) }
+    var updateRequest by rememberSaveable { mutableIntStateOf(0) }
+    AppUpdateDialog(updateRequest)
     val links = LocalUriHandler.current
     fun save(updated: List<FeishuChannel>): Boolean = runCatching {
         vault.save(updated)
@@ -63,6 +65,7 @@ internal fun FeishuScreen(media: ChatMedia, onExit: () -> Unit) {
                     Text("登录后，添加或选择你的飞书智能体。", style = MaterialTheme.typography.bodyMedium)
                     Spacer(Modifier.height(28.dp))
                     Button(onClick = { signingIn = true }, modifier = Modifier.fillMaxWidth()) { Text("使用飞书登录") }
+                    TextButton(onClick = { updateRequest++ }) { Text("检查更新") }
                 }
                 return@Column
             }
@@ -105,6 +108,7 @@ internal fun FeishuScreen(media: ChatMedia, onExit: () -> Unit) {
                     }
                     item { TextButton(onClick = { links.openUri("https://aily.feishu.cn/") }) { Text("去飞书创建或配置智能体") } }
                     item { TextButton(onClick = { signingIn = true }) { Text("登录飞书账号") } }
+                    item { TextButton(onClick = { updateRequest++ }) { Text("检查更新") } }
                     item { TextButton(onClick = { confirmLogout = true }, enabled = !loggingOut) { Text("清除本机飞书登录状态") } }
                 }
             } else {

@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-RELEASE_NOTES = '飞书会话新增手机图片和文件选择、附件下载、麦克风语音输入和位置链接。从旧服务器模式升级会清理本机旧配对、草稿和附件，旧聊天记录不迁移。'
+RELEASE_NOTES = '新增启动更新提醒。登录首页和智能体选择页可手动检查更新。使用 0.0.7 或更早版本的用户，请先从蒲公英覆盖安装带提醒的版本。'
 
 def make_manifest(apk, version, code, tag, pgyer):
     return {'versionName':version,'versionCode':int(code),'apkUrl':f'https://github.com/mnhkahn/xiaoli-droid/releases/download/{tag}/xiaoli.apk','sha256':hashlib.sha256(apk.read_bytes()).hexdigest(),'pgyerUrl':pgyer,'notes':RELEASE_NOTES}

@@ -35,6 +35,8 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 
 ## 发布
 
+正式包启动时读取 GitHub Release 的 `update.json`，有更高的 Android versionCode 就提示前往蒲公英覆盖安装。登录首页和智能体选择页也可以点「检查更新」。0.0.7 及更早的已发布版本需要手动覆盖安装一次带提醒的版本。[蒲公英下载页](https://www.pgyer.com/xiaoli-android-2)
+
 仓库 Secrets：`RELEASE_KEYSTORE_BASE64`、`RELEASE_STORE_PASSWORD`、`PGYER_API_KEY`。发布证书 alias 为 `xiaoli`，首次生成后必须保存，后续所有发布复用。
 
 - 推送 main 或创建拉取请求会运行 `Android CI`，执行单测、Lint 和模拟器 UI 测试。
