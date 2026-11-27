@@ -148,6 +148,19 @@ class ChatMediaTest {
         while (node != null && !node.isClickable) node = node.parent
         return node?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
     }
+    private fun findFixtureControl(matches: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        // WebView exposes virtual children but does not implement text search on them.
+        fun visit(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+            if (matches(node)) return node
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                visit(child)?.let { return it }
+            }
+            return null
+        }
+        val root = ui.rootInActiveWindow ?: return null
+        return if (root.packageName == context.packageName) visit(root) else null
+    }
     private fun collectionFile(name: String): Uri? {
         val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
         return context.contentResolver.query(collection, arrayOf("_id"), "_display_name=? AND is_pending=0",arrayOf(name),null)?.use {
@@ -306,20 +319,27 @@ class ChatMediaTest {
                 })
                 clickNode("复制到会话")
             }
+            val expectedLocation = "当前位置：39.123456, 116.654321\n" +
+                "https://www.openstreetmap.org/?mlat=39.123456&mlon=116.654321#map=16/39.123456/116.654321"
             waitFor("location clipboard") {
                 var text = ""
                 ins.runOnMainSync { text = context.getSystemService(ClipboardManager::class.java).primaryClip?.getItemAt(0)?.text.toString() }
-                text.contains("39.123456") && text.contains("mlon=116.654321")
+                text == expectedLocation
             }
-            tapRow(4)
-            ins.sendKeySync(android.view.KeyEvent(0,0,android.view.KeyEvent.ACTION_DOWN,android.view.KeyEvent.KEYCODE_V,0,android.view.KeyEvent.META_CTRL_ON))
-            ins.sendKeySync(android.view.KeyEvent(0,0,android.view.KeyEvent.ACTION_UP,android.view.KeyEvent.KEYCODE_V,0,android.view.KeyEvent.META_CTRL_ON))
-            waitFor("paste in iframe") { report().optString("text").contains("mlon=116.654321") }
-            var opened: Uri? = null
+            waitFor("focus message field") {
+                val field = findFixtureControl { it.isEditable }
+                field?.performAction(AccessibilityNodeInfo.ACTION_FOCUS) == true
+            }
+            waitFor("paste Android clipboard into focused message field") {
+                val field = findFixtureControl { it.isEditable && it.isFocused }
+                field?.performAction(AccessibilityNodeInfo.ACTION_PASTE) == true
+            }
+            waitFor("paste in iframe") { report().optString("text") == expectedLocation }
+            val opened = ArrayBlockingQueue<Uri>(1)
             val monitor = object : Instrumentation.ActivityMonitor() {
                 override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult? {
                     if (intent.action == Intent.ACTION_VIEW) {
-                        opened = intent.data
+                        intent.data?.let { opened.offer(it) }
                         return Instrumentation.ActivityResult(0,null)
                     }
                     return null
@@ -327,8 +347,14 @@ class ChatMediaTest {
             }
             ins.addMonitor(monitor)
             try {
-                tapRow(3)
-                waitFor("open map reply") { opened?.host == "www.openstreetmap.org" }
+                waitFor("activate map reply") {
+                    val map = findFixtureControl {
+                        it.isClickable && (it.text?.toString() == "Map" || it.contentDescription?.toString() == "Map")
+                    }
+                    map?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
+                }
+                assertEquals("map reply sent to Android", Uri.parse("https://www.openstreetmap.org/?mlat=39&mlon=116"),
+                    opened.poll(18, TimeUnit.SECONDS))
             } finally { ins.removeMonitor(monitor) }
         } finally {
             mgr.removeTestProvider(gps)
