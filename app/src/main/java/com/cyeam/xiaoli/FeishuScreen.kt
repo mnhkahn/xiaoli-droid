@@ -25,7 +25,8 @@ internal fun FeishuScreen(media: ChatMedia, onExit: () -> Unit) {
     // Most recently selected channel is first. A single encrypted write keeps selection and list consistent.
     var channels by remember { mutableStateOf(vault.read()) }
     var choosing by rememberSaveable { mutableStateOf(channels.isEmpty()) }
-    var signingIn by rememberSaveable { mutableStateOf(channels.isEmpty()) }
+    var welcome by remember { mutableStateOf(!vault.completedSignIn) }
+    var signingIn by rememberSaveable { mutableStateOf(false) }
     var adding by rememberSaveable { mutableStateOf(false) }
     var confirmLogout by remember { mutableStateOf(false) }
     var loggingOut by remember { mutableStateOf(false) }
@@ -42,19 +43,34 @@ internal fun FeishuScreen(media: ChatMedia, onExit: () -> Unit) {
     }
     BackHandler {
         when {
-            panel?.back() == true -> Unit
             signingIn -> signingIn = false
+            welcome -> onExit()
+            panel?.back() == true -> Unit
             choosing && channels.isNotEmpty() -> choosing = false
             else -> onExit()
         }
     }
     Surface(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().safeDrawingPadding()) {
+            if (welcome && !signingIn) {
+                Column(
+                    Modifier.fillMaxSize().padding(horizontal = 28.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text("小李", style = MaterialTheme.typography.headlineLarge)
+                    Spacer(Modifier.height(8.dp))
+                    Text("登录后，添加或选择你的飞书智能体。", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(28.dp))
+                    Button(onClick = { signingIn = true }, modifier = Modifier.fillMaxWidth()) { Text("使用飞书登录") }
+                }
+                return@Column
+            }
             Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(if (signingIn) "飞书登录" else if (choosing) "飞书智能体" else channels.first().name,
                     Modifier.weight(1f), maxLines = 1, style = MaterialTheme.typography.titleMedium)
                 if (signingIn) {
-                    TextButton(onClick = { signingIn = false }) { Text("选择智能体") }
+                    TextButton(onClick = { signingIn = false }) { Text("返回") }
                 } else if (!choosing) {
                     TextButton(onClick = { panel?.let(media::shareLocation) }) { Text("位置") }
                     TextButton(onClick = { reload++ }) { Text("重新加载") }
@@ -64,7 +80,11 @@ internal fun FeishuScreen(media: ChatMedia, onExit: () -> Unit) {
             if (error.isNotEmpty()) Text(error, Modifier.padding(12.dp), color = MaterialTheme.colorScheme.error)
             if (signingIn) {
                 key("sign-in") {
-                    AndroidView(factory = { FeishuPanel(it, null) { signingIn = false }.also { view -> panel = view } },
+                    AndroidView(factory = { FeishuPanel(it, null) {
+                        vault.completedSignIn = true
+                        welcome = false
+                        signingIn = false
+                    }.also { view -> panel = view } },
                         modifier = Modifier.fillMaxSize(), onRelease = { view ->
                             if (panel === view) panel = null
                             view.close()
@@ -126,9 +146,11 @@ internal fun FeishuScreen(media: ChatMedia, onExit: () -> Unit) {
         confirmButton = { TextButton(onClick = {
             confirmLogout = false
             loggingOut = true
+            vault.completedSignIn = false
             WebStorage.getInstance().deleteAllData()
             CookieManager.getInstance().removeAllCookies {
                 CookieManager.getInstance().flush()
+                welcome = true
                 loggingOut = false
             }
         }) { Text("清除") } }, dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("取消") } })

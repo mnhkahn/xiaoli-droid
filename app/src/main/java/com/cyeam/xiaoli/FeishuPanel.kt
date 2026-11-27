@@ -1,30 +1,33 @@
 package com.cyeam.xiaoli
 
 import android.annotation.SuppressLint
+import android.content.ActivityNotFoundException
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Message
 import android.text.TextUtils
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.Toast
 import java.io.ByteArrayInputStream
 
 /** Web SDK host. Sign-in windows share WebView cookies with the embedded Feishu frame. */
 internal class FeishuPanel(context: Context, private val channel: FeishuChannel?, private val media: ChatMedia? = null, private val onReturnFromLogin: () -> Unit = {}) : FrameLayout(context) {
     private val origin = "https://$FEISHU_PANEL_HOST"
     private val home = "$origin/panel.html"
-    private var visitedPassport = false
 
     init {
         val main = browser()
         addView(main)
-        main.loadUrl(if (channel == null) "https://aily.feishu.cn/" else home)
+        main.loadUrl(if (channel == null) "https://aily.feishu.cn/bot" else home)
     }
 
     private fun isFeishu(uri: Uri): Boolean {
@@ -62,20 +65,46 @@ internal class FeishuPanel(context: Context, private val channel: FeishuChannel?
         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
         var popupGesture = fromGesture
         webViewClient = object : WebViewClient() {
+            private var pageFailed = false
             override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                pageFailed = false
                 media?.pageChanged(view)
             }
+            override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                if (request.isForMainFrame) pageFailed = true
+            }
+            override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
+                if (request.isForMainFrame) pageFailed = true
+            }
             override fun onPageFinished(view: WebView, url: String) {
-                if (channel != null) return
-                val host = Uri.parse(url).host
-                if (host == "accounts.feishu.cn" || host == "accounts.doubao.com") visitedPassport = true
-                if (visitedPassport && host == "aily.feishu.cn") {
-                    visitedPassport = false
+                if (channel != null || pageFailed || view.url != url) return
+                val uri = Uri.parse(url)
+                if (uri.scheme == "https" && uri.authority == "aily.feishu.cn" && uri.path == "/ai/agents/bot") {
                     onReturnFromLogin()
                 }
             }
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest) = localAsset(request.url)
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val uri = request.url
+                if (uri.scheme == "lark") {
+                    // Passport creates the per-login verification link and waits for approval in this WebView.
+                    val page = view.url?.let(Uri::parse)
+                    if (page?.scheme == "https" && page.authority in setOf("accounts.feishu.cn", "login.feishu.cn") &&
+                        page.path == "/accounts/page/login" &&
+                        uri.encodedAuthority == "client" && uri.encodedPath == "/verify" &&
+                        !uri.getQueryParameter("qr_code").isNullOrBlank()) {
+                        val intent = Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE)
+                            .setPackage("com.ss.android.lark")
+                        try {
+                            context.startActivity(intent)
+                        } catch (_: ActivityNotFoundException) {
+                            Toast.makeText(context, "无法打开飞书，请选择其他登录方式", Toast.LENGTH_LONG).show()
+                        } catch (_: SecurityException) {
+                            Toast.makeText(context, "系统限制了打开飞书，请选择其他登录方式", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                    return true
+                }
                 if (!request.isForMainFrame) {
                     if (request.hasGesture() && media != null &&
                         (request.url.scheme == "geo" || (request.url.scheme == "https" && !isFeishu(request.url)))) {
@@ -84,7 +113,6 @@ internal class FeishuPanel(context: Context, private val channel: FeishuChannel?
                     }
                     return request.url.scheme !in setOf("https", "about", "blob")
                 }
-                val uri = request.url
                 val userAction = request.hasGesture() || popupGesture
                 if (uri.toString() == "about:blank") return false
                 popupGesture = false

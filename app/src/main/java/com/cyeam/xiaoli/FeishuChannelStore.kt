@@ -13,6 +13,10 @@ import javax.crypto.spec.GCMParameterSpec
 internal class FeishuChannelStore(context: Context) {
     private val prefs = context.getSharedPreferences("feishu", Context.MODE_PRIVATE)
 
+    var completedSignIn: Boolean
+        get() = prefs.getBoolean("completedSignIn", false)
+        set(value) { prefs.edit().putBoolean("completedSignIn", value).apply() }
+
     private fun key(): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         return (ks.getKey("xiaoli-feishu-channels", null) as? SecretKey)
