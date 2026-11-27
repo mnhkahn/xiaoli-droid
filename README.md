@@ -38,6 +38,7 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 仓库 Secrets：`RELEASE_KEYSTORE_BASE64`、`RELEASE_STORE_PASSWORD`、`PGYER_API_KEY`。发布证书 alias 为 `xiaoli`，首次生成后必须保存，后续所有发布复用。
 
 - 推送 main 或创建拉取请求会运行 `Android CI`，执行单测、Lint 和模拟器 UI 测试。
+- CI 遇到 KVM 不可用、模拟器无法启动或 Android 桌面无响应且恢复失败时，会跳过设备测试并在运行摘要中标明原因。编译、单测、Lint 及已开始运行的设备测试失败都会阻止发布。
 - 推送 `v0.2.0` 或 `0.2.0` 形式的标签会运行 `Android Release`，通过同一套验证后签名、上传蒲公英并发布 GitHub Release。
 - 手动运行 `Android Release` 时填写 `major.minor.patch` 版本。
 

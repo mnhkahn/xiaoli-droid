@@ -20,21 +20,53 @@ jobs:
         with:
           packages: platform-tools platforms;android-35 build-tools;35.0.0
       - uses: gradle/actions/setup-gradle@v4
-      - run: ./gradlew testDebugUnitTest lintDebug assembleDebug --console=plain
+      - run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest --console=plain
       - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - run: bash -n scripts/prepare_ci_emulator.sh
       - name: Enable emulator acceleration
+        id: kvm
+        continue-on-error: true
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle --timeout=10
+          test -r /dev/kvm && test -w /dev/kvm
       - name: Emulator UI tests
+        id: emulator
+        if: steps.kvm.outcome == 'success'
+        continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           arch: x86_64
           profile: pixel_6
           disable-animations: true
-          script: ./gradlew connectedDebugAndroidTest --console=plain
+          pre-emulator-launch-script: echo 'phase=boot' >> "$GITHUB_OUTPUT"
+          script: |
+            echo 'phase=preflight' >> "$GITHUB_OUTPUT"
+            timeout 45s bash scripts/prepare_ci_emulator.sh
+            echo 'phase=testing' >> "$GITHUB_OUTPUT"
+            ./gradlew connectedDebugAndroidTest --console=plain
+            echo 'phase=passed' >> "$GITHUB_OUTPUT"
+      - name: Check emulator result
+        if: ${{ !cancelled() && (steps.kvm.outcome == 'failure' || steps.emulator.outcome == 'failure') }}
+        env:
+          KVM_OUTCOME: ${{ steps.kvm.outcome }}
+          EMULATOR_PHASE: ${{ steps.emulator.outputs.phase }}
+        run: |
+          if [[ "$KVM_OUTCOME" == failure ]]; then
+            message="Skipped device tests because the runner could not enable KVM."
+          else
+            case "$EMULATOR_PHASE" in
+              boot) message="Skipped device tests because the emulator could not boot." ;;
+              preflight) message="Skipped device tests because the emulator did not pass its Android readiness checks." ;;
+              passed) message="Device tests passed, but emulator shutdown failed." ;;
+              *) echo "::error::Emulator verification failed. See the Emulator UI tests log and verification artifact."; exit 1 ;;
+            esac
+          fi
+          echo "::warning::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
