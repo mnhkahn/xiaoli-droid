@@ -96,11 +96,11 @@ class PlatformChatTest {
         lateinit var model: ChatModel
         ui.activity.runOnUiThread { model = ChatModel(app, ::api) }
         val launched = java.util.concurrent.CopyOnWriteArrayList<Brand>()
-        ui.setContent { MaterialTheme { ChatScreen(model) { _, brand, _, _ -> launched.add(brand) } } }
+        ui.setContent { MaterialTheme { ChatScreen(model, onCheckUpdate = {}) { _, brand, _ -> launched.add(brand) } } }
         for (brand in Brand.entries) {
             active.set(brand)
             ui.onNodeWithText("使用${brand.title}登录").performClick()
-            waitText("前往${brand.title}确认")
+            waitText("打开官方确认页")
             waitText("智能体${brand.name}")
             ui.onNodeWithText("群聊").assertDoesNotExist()
             ui.onNodeWithText("智能体${brand.name}").performClick()
@@ -115,6 +115,54 @@ class PlatformChatTest {
         ui.runOnIdle { model.home() }
         assertEquals(2, sent.size)
         assertEquals(Brand.entries.toList(), launched.toList())
+    }
+
+    @Test fun browserReceivesTheOfficialApprovalUrlUnchanged() {
+        for (brand in Brand.entries) {
+            val url = "https://open.${brand.domain}/page/launcher?user_code=A-B&extra=%2B%26%3D"
+            val ticket = Approval(url, "A-B", true, "device", Long.MAX_VALUE, 1)
+            val intent = approvalIntent(brand, ticket)
+            assertEquals(android.content.Intent.ACTION_VIEW, intent.action)
+            assertEquals(url, intent.dataString)
+            assertTrue(intent.hasCategory(android.content.Intent.CATEGORY_BROWSABLE))
+            assertNull(intent.`package`)
+            assertEquals("https", intent.selector?.data?.scheme)
+        }
+    }
+
+    @Test fun renewPendingUserAuthorizationKeepsTheRegisteredAppAndReplacesTheCode() {
+        val store = ImStore(app)
+        val brand = Brand.LARK
+        val original = Approval("https://accounts.larksuite.com/activate?user_code=OLD", "OLD", false,
+            "old-device", System.currentTimeMillis() + 60_000, 5)
+        val keys = AppKeys("cli_existing", "secret")
+        store.write(brand, LoginState(keys = keys, pending = original))
+        store.active = brand
+        val enrollments = java.util.concurrent.atomic.AtomicInteger()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.requestUrl!!.encodedPath != "/oauth/v1/device_authorization")
+                    return MockResponse().setResponseCode(400).setBody(json("error" to "authorization_pending").toString())
+                enrollments.incrementAndGet()
+                return MockResponse().setBody(json("device_code" to "new-device", "user_code" to "NEW", "interval" to 5,
+                    "verification_uri_complete" to "https://accounts.larksuite.com/activate?user_code=NEW").toString())
+            }
+        }
+        lateinit var model: ChatModel
+        ui.activity.runOnUiThread { model = ChatModel(app, ::api) }
+        val opened = java.util.concurrent.CopyOnWriteArrayList<String>()
+        ui.setContent { MaterialTheme { ChatScreen(model, onCheckUpdate = {}) { _, _, ticket -> opened.add(ticket.code) } } }
+        try {
+            waitText("确认码  OLD")
+            assertEquals(0, enrollments.get())
+            ui.onNodeWithText("获取新链接").performClick()
+            waitText("确认码  NEW")
+            ui.waitUntil(10000) { opened.toList() == listOf("NEW") }
+            assertEquals(1, enrollments.get())
+            val saved = store.read(brand)
+            assertEquals(keys, saved.keys)
+            assertEquals("new-device", saved.pending?.device)
+        } finally { ui.runOnIdle { model.home() } }
     }
 
     @Test fun isolateAndRestoreEncryptedAccountAndPendingLogin() {
@@ -134,7 +182,7 @@ class PlatformChatTest {
     private fun roundTrip(brand: Brand, type: String, name: String, mime: String, bytes: ByteArray, duration: Long = 0) {
         val resolver = app.contentResolver
         val input = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, ContentValues().apply {
-            put(MediaStore.Downloads.DISPLAY_NAME, name)
+            put(MediaStore.Downloads.DISPLAY_NAME, "${UUID.randomUUID()}-$name")
             put(MediaStore.Downloads.MIME_TYPE,mime)
         })!!
         try {

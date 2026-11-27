@@ -22,37 +22,46 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.awaitCancellation
 
-internal fun openApproval(context: Context, brand: Brand, approval: Approval, browser: Boolean) {
-    val verified = brand.verificationUrl(approval.url)
-    if (!browser) {
-        val link = Uri.Builder().scheme("https").authority("applink.${brand.domain}")
-            .path("/client/web_url/open").appendQueryParameter("url", verified.toString()).build()
-        try {
-            context.startActivity(Intent(Intent.ACTION_VIEW, link).setPackage(brand.clientPackage))
-            return
-        } catch (_: ActivityNotFoundException) { /* A browser can also finish device authorization. */ }
+internal fun approvalIntent(brand: Brand, approval: Approval): Intent {
+    val officialPage = brand.verificationUrl(approval.url)
+    return Intent(Intent.ACTION_VIEW, Uri.parse(officialPage.toString())).addCategory(Intent.CATEGORY_BROWSABLE).apply {
+        // Resolve a web browser even when a messaging app claims the verification host.
+        // The original data, including its encoded query, is delivered to the browser.
+        selector = Intent(Intent.ACTION_VIEW, Uri.parse("https://")).addCategory(Intent.CATEGORY_BROWSABLE)
     }
-    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(verified.toString())).addCategory(Intent.CATEGORY_BROWSABLE))
+}
+
+private fun openApproval(context: Context, brand: Brand, approval: Approval) {
+    context.startActivity(approvalIntent(brand, approval))
 }
 
 @Composable
-internal fun ChatScreen(model: ChatModel, launchApproval: (Context, Brand, Approval, Boolean) -> Unit = ::openApproval) {
+internal fun ChatScreen(model: ChatModel, onCheckUpdate: () -> Unit, launchApproval: (Context, Brand, Approval) -> Unit = ::openApproval) {
     val brand = model.brand
     val peer = model.selected
     val context = LocalContext.current
     var openOnReady by rememberSaveable { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val pending = model.approval
+    fun openCurrentApproval() {
+        val ticket = model.approval ?: return
+        val provider = model.brand ?: return
+        if (ticket.until <= System.currentTimeMillis()) {
+            openOnReady = true
+            model.renewLoginLink()
+            return
+        }
+        openOnReady = false
+        try { launchApproval(context, provider, ticket) }
+        catch (_: ActivityNotFoundException) { model.notice("找不到可打开授权页的浏览器") }
+    }
     LaunchedEffect(openOnReady, pending, brand) {
         if (openOnReady && pending != null && brand != null) {
             lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-                openOnReady = false
-                try { launchApproval(context, brand, pending, false) }
-                catch (_: ActivityNotFoundException) { model.notice("找不到可打开授权页的浏览器") }
+                openCurrentApproval()
             }
         }
     }
-    var update by rememberSaveable { mutableIntStateOf(0) }
     var confirmLogout by remember { mutableStateOf(false) }
     BackHandler(enabled = brand != null) {
         if (!model.sending) { if (peer != null) model.select(null) else model.home() }
@@ -82,13 +91,9 @@ internal fun ChatScreen(model: ChatModel, launchApproval: (Context, Brand, Appro
                     Text(if (approval.registration) "首次连接，请在开放平台确认创建小李专用应用。完成后还需授权账号访问单聊。"
                         else "请确认授权小李读取单聊，并以你的身份向选中的会话发消息。")
                     if (approval.code.isNotEmpty()) SelectionContainer { Text("确认码  ${approval.code}") }
-                    fun open(browser: Boolean) {
-                        try { launchApproval(context, brand, approval, browser) }
-                        catch (_: ActivityNotFoundException) { model.notice("找不到可打开授权页的浏览器") }
-                    }
-                    Button(onClick = { open(false) }) { Text("前往${brand.title}确认") }
-                    TextButton(onClick = { open(true) }) { Text("在浏览器中打开") }
-                    Text("确认后返回小李即可继续。")
+                    Button(onClick = ::openCurrentApproval) { Text("打开官方确认页") }
+                    TextButton(onClick = { openOnReady = true; model.renewLoginLink() }) { Text("获取新链接") }
+                    Text("在官方页面登录并确认后，返回小李继续。")
                 } else if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 else {
                     Button(onClick = { openOnReady = true; model.login() }) { Text("继续登录") }
@@ -111,10 +116,9 @@ internal fun ChatScreen(model: ChatModel, launchApproval: (Context, Brand, Appro
                     }
                 }
             } else key(brand, peer.id) { Conversation(model) }
-            if (peer == null) TextButton(onClick = { update++ }) { Text("检查更新") }
+            if (peer == null) TextButton(onClick = onCheckUpdate) { Text("检查更新") }
         }
     }
-    AppUpdateDialog(update)
     if (confirmLogout) AlertDialog(onDismissRequest = { confirmLogout = false },
         title = { Text(if (model.signedIn) "退出${brand?.title}账号？" else "重置本机连接？") },
         text = { Text(if (model.signedIn) "下次登录需要重新授权和选择会话。" else "下次登录将重新创建专用应用。") },

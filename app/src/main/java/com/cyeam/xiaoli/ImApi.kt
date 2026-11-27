@@ -14,9 +14,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
-internal enum class Brand(val title: String, val domain: String, val clientPackage: String) {
-    FEISHU("飞书", "feishu.cn", "com.ss.android.lark"),
-    LARK("Lark", "larksuite.com", "com.larksuite.suite");
+internal enum class Brand(val title: String, val domain: String) {
+    FEISHU("飞书", "feishu.cn"),
+    LARK("Lark", "larksuite.com");
 
     fun verificationUrl(raw: String): HttpUrl = raw.toHttpUrl().also {
         require(it.isHttps && it.port == 443 && it.username.isEmpty() && it.password.isEmpty() &&

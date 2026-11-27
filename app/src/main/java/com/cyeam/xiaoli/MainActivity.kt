@@ -21,9 +21,11 @@ class MainActivity : ComponentActivity() {
                 .onFailure { Log.w("Xiaoli", "Legacy data cleanup will retry on next launch", it) }
         }
         val chat = ViewModelProvider(this)[ChatModel::class.java]
+        val updates = ViewModelProvider(this)[AppUpdateModel::class.java]
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
-                ChatScreen(chat)
+                ChatScreen(chat, onCheckUpdate = { updates.check() })
+                AppUpdateDialog(updates)
             }
         }
     }

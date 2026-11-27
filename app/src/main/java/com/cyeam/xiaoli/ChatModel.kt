@@ -89,7 +89,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
             selected = account.peer.takeIf { signedIn }
             store.active = value
             if (signedIn && selected == null) listPeers()
-            else if (!signedIn && (!restore || account.pending != null)) login()
+            else if (!signedIn && (!restore || account.pending != null)) login(resumePending = restore)
         } catch (e: Exception) { signedIn = false; selected = null; notice(e.message ?: "本机授权不可读") }
     }
 
@@ -99,10 +99,17 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         home()
     }
 
-    fun login() = work {
+    fun renewLoginLink() {
+        if (signedIn || approval == null) return
+        clearWork()
+        login()
+    }
+
+    fun login(resumePending: Boolean = false) = work {
         val flow = ImLogin(api)
         suspend fun show(it: Approval) = withContext(Dispatchers.Main.immediate) { persist(account.copy(pending = it)); approval = it }
-        val pending = account.pending?.takeIf { it.until > System.currentTimeMillis() }
+        val pending = account.pending?.takeIf { resumePending && it.until > System.currentTimeMillis() }
+        if (pending == null && account.pending != null) persist(account.copy(pending = null))
         val keys = account.keys ?: withContext(Dispatchers.IO) { flow.register(pending?.takeIf { it.registration }, ::show) }.also {
             persist(LoginState(keys = it))
         }
@@ -122,10 +129,11 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
             try { block() }
             catch (e: CancellationException) { throw e }
             catch (e: OAuthFailure) {
+                if (session !== own) return@launch
                 if (account.pending != null) persist(account.copy(pending = null))
                 notice(e.message ?: "授权失败")
             }
-            catch (e: Exception) { notice(e.message ?: "操作失败") }
+            catch (e: Exception) { if (session === own) notice(e.message ?: "操作失败") }
             finally { if (session === own) { busy = false; approval = null } }
         }
     }

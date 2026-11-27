@@ -17,7 +17,7 @@ class ImApiTest {
         enqueue(MockResponse().setResponseCode(status).setBody(body.toString()))
     }
     private fun begin(domain: String) = json("device_code" to "device", "user_code" to "ABCD",
-        "expires_in" to 60, "interval" to 1, "verification_uri_complete" to "https://open.$domain/page/launcher?code=ABCD")
+        "expires_in" to 60, "interval" to 1, "verification_uri_complete" to "https://open.$domain/page/launcher?user_code=ABCD")
 
     @Test fun registrationUserConsentAndRefreshOnBothPlatforms() = runBlocking {
         for (brand in Brand.entries) MockWebServer().use { server ->
@@ -30,6 +30,7 @@ class ImApiTest {
             val keys = login.register { approval ->
                 val link = approval.url.toHttpUrl()
                 assertTrue(approval.registration)
+                assertEquals("ABCD", link.queryParameter("user_code"))
                 assertEquals("open.$domain", link.host)
                 assertEquals("true", link.queryParameter("createOnly"))
                 val encoded = Base64.getUrlDecoder().decode(link.queryParameter("addons"))
@@ -50,6 +51,24 @@ class ImApiTest {
             server.reply(json("access_token" to "next", "refresh_token" to "r2"))
             assertEquals("r2", login.refresh(keys, token).refresh)
             assertTrue(server.takeRequest().body.readUtf8().contains("refresh_token=r1"))
+        }
+    }
+
+    @Test fun registrationUsesTheReturnedLifetimeAndCodeWithOnlyABaseUrl() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val login = ImLogin(ImApi(Brand.LARK, server.url("/"), server.url("/")))
+            server.reply(json("device_code" to "dev", "user_code" to "A-B", "expire_in" to 22, "interval" to 1,
+                "verification_uri" to "https://open.larksuite.com/page/launcher?from=sdk"))
+            server.reply(json("client_id" to "app", "client_secret" to "secret"))
+            val before = System.currentTimeMillis()
+            login.register { ticket ->
+                val link = ticket.url.toHttpUrl()
+                assertEquals(listOf("A-B"), link.queryParameterValues("user_code"))
+                assertEquals(listOf("sdk"), link.queryParameterValues("from"))
+                assertTrue(ticket.until in (before + 22_000)..(System.currentTimeMillis() + 22_000))
+            }
+            Unit
         }
     }
 

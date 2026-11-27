@@ -34,18 +34,23 @@ internal class ImLogin(private val api: ImApi) {
 
     private fun ticket(begin: JSONObject, registering: Boolean): Approval {
         checked(begin)
-        val url = api.brand.verificationUrl(begin.optString("verification_uri_complete").ifBlank { begin.getString("verification_uri") })
+        val complete = begin.optString("verification_uri_complete")
+        val url = api.brand.verificationUrl(complete.ifBlank { begin.getString("verification_uri") })
         val link = url.newBuilder()
         if (registering) {
+            if (complete.isBlank() && url.encodedPath == "/page/launcher" && url.queryParameter("user_code").isNullOrBlank()) {
+                link.setQueryParameter("user_code", begin.getString("user_code"))
+            }
             val addons = json("preset" to false, "scopes" to json("user" to JSONArray(userScopes)))
             val bytes = ByteArrayOutputStream()
             GZIPOutputStream(bytes).use { it.write(addons.toString().toByteArray()) }
-            link.addQueryParameter("from", "sdk").addQueryParameter("tp", "sdk")
-                .addQueryParameter("source", "xiaoli-android").addQueryParameter("createOnly", "true")
-                .addQueryParameter("name", "小李").addQueryParameter("addons", Base64.getUrlEncoder().withoutPadding().encodeToString(bytes.toByteArray()))
+            link.setQueryParameter("from", "sdk").setQueryParameter("tp", "sdk")
+                .setQueryParameter("source", "xiaoli-android").setQueryParameter("createOnly", "true")
+                .setQueryParameter("name", "小李").setQueryParameter("addons", Base64.getUrlEncoder().withoutPadding().encodeToString(bytes.toByteArray()))
         }
+        val lifetime = listOf("expire_in", "expires_in").map { begin.optLong(it, 0) }.firstOrNull { it > 0 } ?: 600L
         return Approval(link.build().toString(), begin.optString("user_code"), registering, begin.getString("device_code"),
-            System.currentTimeMillis() + begin.optLong("expires_in", 600).coerceIn(1, 3600) * 1000,
+            System.currentTimeMillis() + lifetime.coerceAtMost(3600) * 1000,
             begin.optLong("interval", 5).coerceIn(1, 60))
     }
 
