@@ -47,7 +47,7 @@ internal class ImLogin(private val api: ImApi) {
             val bytes = ByteArrayOutputStream()
             GZIPOutputStream(bytes).use { it.write(addons.toString().toByteArray()) }
             link.setQueryParameter("from", "sdk").setQueryParameter("tp", "sdk")
-                .setQueryParameter("source", "xiaoli-android").setQueryParameter("createOnly", "true")
+                .setQueryParameter("source", "xiaoli-android")
                 .setQueryParameter("name", "小李").setQueryParameter("addons", Base64.getUrlEncoder().withoutPadding().encodeToString(bytes.toByteArray()))
         }
         val lifetime = listOf("expire_in", "expires_in").map { begin.optLong(it, 0) }.firstOrNull { it > 0 } ?: 600L
@@ -63,8 +63,9 @@ internal class ImLogin(private val api: ImApi) {
         val values = url.queryParameterValues("user_code")
         val code = ticket.code.ifBlank { values.singleOrNull().orEmpty() }
         if (code.isBlank()) return null
-        if (values == listOf(code)) return ticket.copy(code = code)
-        return ticket.copy(code = code, url = url.newBuilder().setQueryParameter("user_code", code).build().toString())
+        val link = url.newBuilder().removeAllQueryParameters("createOnly")
+        if (values != listOf(code)) link.setQueryParameter("user_code", code)
+        return ticket.copy(code = code, url = link.build().toString())
     }
 
     private suspend fun approve(ticket: Approval, show: suspend (Approval) -> Unit,

@@ -92,7 +92,7 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
             model.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             launchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (brand == null) {
-                Text(if (clients.isEmpty()) "请先安装或启用 Lark 或飞书，再返回小李登录。" else "用已有账号登录，再选择要联系的智能体。")
+                Text(if (clients.isEmpty()) "请先安装或启用 Lark 或飞书，再返回小李登录。" else "登录后，在小李选择你和智能体已有的单聊。")
                 for (entry in clients) Button(onClick = { openOnReady = true; model.enter(entry) }, modifier = Modifier.fillMaxWidth()) {
                     Text("使用${entry.title}登录")
                 }
@@ -100,7 +100,7 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
                 Text("${brand.title}登录", style = MaterialTheme.typography.titleLarge)
                 val approval = model.approval
                 if (approval != null) {
-                    Text(if (approval.registration) "首次连接，请在开放平台确认创建小李专用应用。完成后还需授权账号访问单聊。"
+                    Text(if (approval.registration) "先在开放平台选择你管理的应用，或新建一个用于授权。确认所需权限后，回到小李授权账号，再选择已有单聊。"
                         else "请确认授权小李读取单聊，并以你的身份向选中的会话发消息。")
                     if (approval.code.isNotEmpty()) SelectionContainer { Text("确认码  ${approval.code}") }
                     Button(onClick = ::openCurrentApproval) { Text("打开${brand.title}确认") }
@@ -133,7 +133,7 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
     }
     if (confirmLogout) AlertDialog(onDismissRequest = { confirmLogout = false },
         title = { Text(if (model.signedIn) "退出${brand?.title}账号？" else "重置本机连接？") },
-        text = { Text(if (model.signedIn) "下次登录需要重新授权和选择会话。" else "下次登录将重新创建专用应用。") },
+        text = { Text(if (model.signedIn) "下次登录需要重新授权和选择会话。" else "下次登录需要重新选择或创建授权应用。") },
         confirmButton = { TextButton(onClick = { confirmLogout = false; model.logout(resetApp = !model.signedIn) }) { Text("确认") } },
         dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("取消") } })
 }

@@ -61,16 +61,21 @@ class PlatformChatTest {
     @Test fun chooseSingleChatAcrossBothAccounts() {
         val active = java.util.concurrent.atomic.AtomicReference(Brand.FEISHU)
         val sent = java.util.concurrent.CopyOnWriteArrayList<Pair<String,String>>()
+        val launched = java.util.concurrent.CopyOnWriteArrayList<Pair<Brand, Boolean>>()
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val brand = active.get()
                 fun approval(issuer: Brand) = json("device_code" to "dev", "user_code" to "ABCD", "interval" to 1,
                     "verification_uri_complete" to "https://open.${issuer.domain}/page/launcher")
                 val step = when (request.requestUrl!!.encodedPath) {
-                    "/oauth/v1/app/registration" -> if (request.body.readUtf8().contains("action=begin")) approval(Brand.FEISHU)
-                        else json("client_id" to "id", "client_secret" to "secret", "user_info" to json("tenant_brand" to brand.name.lowercase()))
-                    "/oauth/v1/device_authorization" -> approval(brand)
-                    "/oauth/v3/token" -> json("access_token" to brand.name, "refresh_token" to "test-refresh")
+                    "/oauth/v1/app/registration" -> when {
+                        request.body.readUtf8().contains("action=begin") -> approval(Brand.FEISHU)
+                        (brand to true) !in launched -> json("error" to "authorization_pending")
+                        else -> json("client_id" to "id", "client_secret" to "secret", "user_info" to json("tenant_brand" to brand.name.lowercase()))
+                    }
+                    "/oauth/v1/device_authorization" -> approval(brand).put("verification_uri_complete", "https://accounts.${brand.domain}/activate?user_code=ABCD")
+                    "/oauth/v3/token" -> if ((brand to false) in launched) json("access_token" to brand.name, "refresh_token" to "test-refresh")
+                        else json("error" to "authorization_pending")
                     else -> null
                 }
                 if (step != null) return MockResponse().setBody(step.toString())
@@ -95,12 +100,17 @@ class PlatformChatTest {
         }
         lateinit var model: ChatModel
         ui.activity.runOnUiThread { model = ChatModel(app, ::api) }
-        val launched = java.util.concurrent.CopyOnWriteArrayList<Brand>()
-        ui.setContent { MaterialTheme { ChatScreen(model, Brand.entries, onCheckUpdate = {}) { _, brand, _ -> launched.add(brand) } } }
+        ui.setContent { MaterialTheme { ChatScreen(model, Brand.entries, onCheckUpdate = {}) { _, brand, ticket ->
+            val inner = android.net.Uri.parse(requireNotNull(approvalIntent(brand, ticket).data?.getQueryParameter("url")))
+            assertFalse("createOnly" in inner.queryParameterNames)
+            assertEquals(ticket.code, inner.getQueryParameter("user_code"))
+            launched.add(brand to ticket.registration)
+        } } }
         for (brand in Brand.entries) {
             active.set(brand)
             ui.onNodeWithText("使用${brand.title}登录").performClick()
-            waitText("打开${brand.title}确认")
+            waitText("请确认授权小李读取单聊，并以你的身份向选中的会话发消息。")
+            ui.onNodeWithText("打开${brand.title}确认").performClick()
             waitText("智能体${brand.name}")
             ui.onNodeWithText("群聊").assertDoesNotExist()
             ui.onNodeWithText("智能体${brand.name}").performClick()
@@ -114,7 +124,7 @@ class PlatformChatTest {
         }
         ui.runOnIdle { model.home() }
         assertEquals(2, sent.size)
-        assertEquals(Brand.entries.toList(), launched.toList())
+        assertEquals(Brand.entries.flatMap { listOf(it to true, it to false) }, launched.toList())
     }
 
     @Test fun loginOnlyOffersInstalledClients() {

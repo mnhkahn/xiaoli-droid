@@ -34,7 +34,7 @@ class ImApiTest {
                 assertTrue(approval.registration)
                 assertEquals("ABCD", link.queryParameter("user_code"))
                 assertEquals("open.$domain", link.host)
-                assertEquals("true", link.queryParameter("createOnly"))
+                assertFalse("createOnly" in link.queryParameterNames)
                 val encoded = Base64.getUrlDecoder().decode(link.queryParameter("addons"))
                 val addons = JSONObject(GZIPInputStream(ByteArrayInputStream(encoded)).bufferedReader().readText())
                 assertFalse(addons.getBoolean("preset"))
@@ -92,11 +92,19 @@ class ImApiTest {
             assertTrue(feishu.takeRequest().body.readUtf8().contains("action=begin"))
             assertEquals("action=poll&device_code=device", feishu.takeRequest().body.readUtf8())
             assertEquals("action=poll&device_code=device", lark.takeRequest().body.readUtf8())
-            lark.reply(issued)
-            val restored = shown.last().copy(url = old.url)
-            login.register(bootstrap, restored) { assertEquals("ABCD", it.url.toHttpUrl().queryParameter("user_code")) }
+            for (url in listOf(old.url, shown.last().url)) {
+                lark.reply(issued)
+                val restored = shown.last().copy(url = "$url&createOnly=true")
+                login.register(bootstrap, restored) {
+                    val link = it.url.toHttpUrl()
+                    assertFalse("createOnly" in link.queryParameterNames)
+                    assertEquals(listOf("ABCD"), link.queryParameterValues("user_code"))
+                    assertEquals("sdk", link.queryParameter("from"))
+                    assertEquals(restored.device, it.device)
+                }
+            }
             assertEquals(2, feishu.requestCount)
-            assertEquals(2, lark.requestCount)
+            assertEquals(3, lark.requestCount)
         } }
     }
 
