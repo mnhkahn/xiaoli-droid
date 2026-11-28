@@ -64,12 +64,12 @@ class PlatformChatTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val brand = active.get()
-                fun approval() = json("device_code" to "dev", "user_code" to "ABCD", "interval" to 1,
-                    "verification_uri_complete" to "https://open.${brand.domain}/page/launcher")
+                fun approval(issuer: Brand) = json("device_code" to "dev", "user_code" to "ABCD", "interval" to 1,
+                    "verification_uri_complete" to "https://open.${issuer.domain}/page/launcher")
                 val step = when (request.requestUrl!!.encodedPath) {
-                    "/oauth/v1/app/registration" -> if (request.body.readUtf8().contains("action=begin")) approval()
-                        else json("client_id" to "id", "client_secret" to "secret")
-                    "/oauth/v1/device_authorization" -> approval()
+                    "/oauth/v1/app/registration" -> if (request.body.readUtf8().contains("action=begin")) approval(Brand.FEISHU)
+                        else json("client_id" to "id", "client_secret" to "secret", "user_info" to json("tenant_brand" to brand.name.lowercase()))
+                    "/oauth/v1/device_authorization" -> approval(brand)
                     "/oauth/v3/token" -> json("access_token" to brand.name, "refresh_token" to "test-refresh")
                     else -> null
                 }
@@ -203,6 +203,9 @@ class PlatformChatTest {
         val restored = ImStore(app)
         assertEquals(first, restored.read(Brand.FEISHU))
         assertEquals(second, restored.read(Brand.LARK))
+        val discovered = LoginState(pending = Approval("https://open.larksuite.com/page/launcher?user_code=CODE", "CODE", true, "device-l", expiry, 5, Brand.LARK))
+        store.write(Brand.LARK, discovered)
+        assertEquals(discovered, restored.read(Brand.LARK))
         val prefs = app.getSharedPreferences("open-platform", Context.MODE_PRIVATE).all.values.joinToString()
         for (value in listOf("secret-f","user-f","oc_f","device-l","secret-l")) assertFalse(prefs.contains(value))
     }

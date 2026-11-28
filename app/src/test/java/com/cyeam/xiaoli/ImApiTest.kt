@@ -24,10 +24,12 @@ class ImApiTest {
             server.start()
             val domain = brand.domain
             val login = ImLogin(ImApi(brand, server.url("/"), server.url("/")))
-            server.reply(begin(domain))
+            val bootstrap = ImApi(Brand.FEISHU, server.url("/"), server.url("/"))
+            server.reply(begin(Brand.FEISHU.domain))
             server.reply(json("error" to "authorization_pending"), 400)
+            if (brand == Brand.LARK) server.reply(json("error" to "authorization_pending", "user_info" to json("tenant_brand" to "lark")), 400)
             server.reply(json("client_id" to "cli_a", "client_secret" to "secr", "user_info" to json("tenant_brand" to brand.name.lowercase())))
-            val keys = login.register { approval ->
+            val keys = login.register(bootstrap) { approval ->
                 val link = approval.url.toHttpUrl()
                 assertTrue(approval.registration)
                 assertEquals("ABCD", link.queryParameter("user_code"))
@@ -39,7 +41,7 @@ class ImApiTest {
                 assertTrue(addons.getJSONObject("scopes").getJSONArray("user").toString().contains("im:resource"))
             }
             assertEquals("/oauth/v1/app/registration", server.takeRequest().path)
-            repeat(2) { assertTrue(server.takeRequest().body.readUtf8().contains("action=poll")) }
+            repeat(if (brand == Brand.LARK) 3 else 2) { assertTrue(server.takeRequest().body.readUtf8().contains("action=poll")) }
             server.reply(begin(domain))
             server.reply(json("access_token" to "access", "refresh_token" to "r1", "expires_in" to 100))
             val token = login.signIn(keys) { assertFalse(it.registration) }
@@ -57,18 +59,56 @@ class ImApiTest {
     @Test fun registrationUsesTheReturnedLifetimeAndCodeWithOnlyABaseUrl() = runBlocking {
         MockWebServer().use { server ->
             server.start()
-            val login = ImLogin(ImApi(Brand.LARK, server.url("/"), server.url("/")))
+            val api = ImApi(Brand.FEISHU, server.url("/"), server.url("/"))
             server.reply(json("device_code" to "dev", "user_code" to "A-B", "expire_in" to 22, "interval" to 1,
-                "verification_uri" to "https://open.larksuite.com/page/launcher?from=sdk"))
+                "verification_uri" to "https://open.feishu.cn/page/launcher?from=sdk"))
             server.reply(json("client_id" to "app", "client_secret" to "secret"))
             val before = System.currentTimeMillis()
-            login.register { ticket ->
+            ImLogin(api).register(api) { ticket ->
                 val link = ticket.url.toHttpUrl()
                 assertEquals(listOf("A-B"), link.queryParameterValues("user_code"))
                 assertEquals(listOf("sdk"), link.queryParameterValues("from"))
                 assertTrue(ticket.until in (before + 22_000)..(System.currentTimeMillis() + 22_000))
             }
             Unit
+        }
+    }
+
+    @Test fun legacyLarkTicketIsReplacedAndDiscoveryCanResumeOnLark() = runBlocking {
+        MockWebServer().use { feishu -> MockWebServer().use { lark ->
+            val bootstrap = ImApi(Brand.FEISHU, feishu.url("/"), feishu.url("/"))
+            val login = ImLogin(ImApi(Brand.LARK, lark.url("/"), lark.url("/")))
+            val old = Approval("https://open.larksuite.com/page/launcher?from=sdk", "OLD", true, "old-device", Long.MAX_VALUE, 1)
+            val fresh = begin("feishu.cn").put("verification_uri_complete", "https://open.feishu.cn/page/launcher?from=sdk")
+            feishu.reply(fresh)
+            feishu.reply(json("error" to "authorization_pending", "user_info" to json("tenant_brand" to "lark")), 400)
+            val issued = json("client_id" to "lark-app", "client_secret" to "secret")
+            lark.reply(issued)
+            val shown = mutableListOf<Approval>()
+            assertEquals("lark-app", login.register(bootstrap, old) { shown.add(it) }.id)
+            assertEquals(listOf(Brand.FEISHU, Brand.LARK), shown.map { it.registrationPollBrand })
+            assertEquals("open.larksuite.com", shown.first().url.toHttpUrl().host)
+            for (ticket in shown) assertEquals(listOf("ABCD"), ticket.url.toHttpUrl().queryParameterValues("user_code"))
+            assertTrue(feishu.takeRequest().body.readUtf8().contains("action=begin"))
+            assertEquals("action=poll&device_code=device", feishu.takeRequest().body.readUtf8())
+            assertEquals("action=poll&device_code=device", lark.takeRequest().body.readUtf8())
+            lark.reply(issued)
+            val restored = shown.last().copy(url = old.url)
+            login.register(bootstrap, restored) { assertEquals("ABCD", it.url.toHttpUrl().queryParameter("user_code")) }
+            assertEquals(2, feishu.requestCount)
+            assertEquals(2, lark.requestCount)
+        } }
+    }
+
+    @Test fun launcherWithoutAnyRegistrationCodeNeverOpens() {
+        MockWebServer().use { server ->
+            val api = ImApi(Brand.FEISHU, server.url("/"), server.url("/"))
+            server.reply(json("device_code" to "private", "verification_uri_complete" to "https://open.feishu.cn/page/launcher?from=sdk"))
+            val error = assertThrows(OAuthFailure::class.java) {
+                runBlocking { ImLogin(api).register(api) { fail("opened an unusable link") } }
+            }
+            assertEquals("invalid_response", error.errorCode)
+            assertEquals(1, server.requestCount)
         }
     }
 
@@ -81,9 +121,10 @@ class ImApiTest {
             MockWebServer().use { server ->
                 server.start()
                 val login = ImLogin(ImApi(brand, server.url("/"), server.url("/")))
-                server.reply(begin(brand.domain))
+                val bootstrap = ImApi(Brand.FEISHU, server.url("/"), server.url("/"))
+                server.reply(begin(Brand.FEISHU.domain))
                 server.reply(json("error" to "access_denied"), 400)
-                assertThrows(OAuthFailure::class.java) { runBlocking { login.register {} } }
+                assertThrows(OAuthFailure::class.java) { runBlocking { login.register(bootstrap) {} } }
             }
         }
     }

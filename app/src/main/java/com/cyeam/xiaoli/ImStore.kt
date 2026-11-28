@@ -53,7 +53,8 @@ internal class ImStore(context: Context) {
         val token = data.optJSONObject("user")?.let { UserToken(it.getString("access"), it.getString("refresh"), it.getLong("until")) }
         val peer = data.optJSONObject("chat")?.let { Peer(it.getString("id"), it.getString("name")) }
         val pending = data.optJSONObject("pending")?.let { Approval(it.getString("url"), it.getString("code"),
-            it.getBoolean("registration"), it.getString("device"), it.getLong("until"), it.getLong("interval")) }
+            it.getBoolean("registration"), it.getString("device"), it.getLong("until"), it.getLong("interval"),
+            Brand.entries.find { brand -> brand.name == it.optString("registrationPollBrand") }) }
         return LoginState(keys, token, peer, pending)
     }
 
@@ -66,8 +67,12 @@ internal class ImStore(context: Context) {
         state.keys?.let { data.put("app", json("id" to it.id, "secret" to it.secret)) }
         state.token?.let { data.put("user", json("access" to it.access, "refresh" to it.refresh, "until" to it.until)) }
         state.peer?.let { data.put("chat", json("id" to it.id, "name" to it.name)) }
-        state.pending?.let { data.put("pending", json("url" to it.url, "code" to it.code, "registration" to it.registration,
-            "device" to it.device, "until" to it.until, "interval" to it.interval)) }
+        state.pending?.let { ticket ->
+            val pending = json("url" to ticket.url, "code" to ticket.code, "registration" to ticket.registration,
+                "device" to ticket.device, "until" to ticket.until, "interval" to ticket.interval)
+            ticket.registrationPollBrand?.let { pending.put("registrationPollBrand", it.name) }
+            data.put("pending", pending)
+        }
         check(prefs.edit().putString(brand.name, encrypted(data.toString())).commit())
     }
 }

@@ -14,7 +14,8 @@ internal val userScopes = listOf("im:chat:read", "im:message:readonly", "im:mess
 
 internal data class AppKeys(val id: String, val secret: String)
 internal data class UserToken(val access: String, val refresh: String, val until: Long)
-internal data class Approval(val url: String, val code: String, val registration: Boolean, val device: String, val until: Long, val interval: Long)
+internal data class Approval(val url: String, val code: String, val registration: Boolean, val device: String, val until: Long, val interval: Long,
+    val registrationPollBrand: Brand? = null)
 internal class OAuthFailure(val errorCode: String, reason: String) : IOException(reason)
 
 private fun checked(response: JSONObject): JSONObject {
@@ -34,12 +35,13 @@ internal class ImLogin(private val api: ImApi) {
 
     private fun ticket(begin: JSONObject, registering: Boolean): Approval {
         checked(begin)
-        val complete = begin.optString("verification_uri_complete")
-        val url = api.brand.verificationUrl(complete.ifBlank { begin.getString("verification_uri") })
+        val complete = if (begin.isNull("verification_uri_complete")) "" else begin.getString("verification_uri_complete")
+        val issuer = if (registering) Brand.FEISHU else api.brand
+        val url = issuer.verificationUrl(complete.ifBlank { begin.getString("verification_uri") })
         val link = url.newBuilder()
         if (registering) {
-            if (complete.isBlank() && url.encodedPath == "/page/launcher" && url.queryParameter("user_code").isNullOrBlank()) {
-                link.setQueryParameter("user_code", begin.getString("user_code"))
+            if (url.host == "open.${issuer.domain}" && url.encodedPath == "/page/launcher") {
+                link.host("open.${api.brand.domain}")
             }
             val addons = json("preset" to false, "scopes" to json("user" to JSONArray(userScopes)))
             val bytes = ByteArrayOutputStream()
@@ -49,16 +51,30 @@ internal class ImLogin(private val api: ImApi) {
                 .setQueryParameter("name", "小李").setQueryParameter("addons", Base64.getUrlEncoder().withoutPadding().encodeToString(bytes.toByteArray()))
         }
         val lifetime = listOf("expire_in", "expires_in").map { begin.optLong(it, 0) }.firstOrNull { it > 0 } ?: 600L
-        return Approval(link.build().toString(), begin.optString("user_code"), registering, begin.getString("device_code"),
+        val code = if (begin.isNull("user_code")) "" else begin.getString("user_code")
+        return Approval(link.build().toString(), code, registering, begin.getString("device_code"),
             System.currentTimeMillis() + lifetime.coerceAtMost(3600) * 1000,
-            begin.optLong("interval", 5).coerceIn(1, 60))
+            begin.optLong("interval", 5).coerceIn(1, 60), if (registering) issuer else null)
     }
 
-    private suspend fun approve(ticket: Approval, show: suspend (Approval) -> Unit, poll: (String) -> JSONObject): JSONObject {
+    private fun registrationWithCode(ticket: Approval): Approval? {
+        val url = api.brand.verificationUrl(ticket.url)
+        if (url.host != "open.${api.brand.domain}" || url.encodedPath != "/page/launcher") return ticket
+        val values = url.queryParameterValues("user_code")
+        val code = ticket.code.ifBlank { values.singleOrNull().orEmpty() }
+        if (code.isBlank()) return null
+        if (values == listOf(code)) return ticket.copy(code = code)
+        return ticket.copy(code = code, url = url.newBuilder().setQueryParameter("user_code", code).build().toString())
+    }
+
+    private suspend fun approve(ticket: Approval, show: suspend (Approval) -> Unit,
+        complete: (JSONObject) -> Boolean = { true }, poll: suspend (String) -> JSONObject): JSONObject {
         show(ticket)
         var interval = ticket.interval
+        var waitBeforePoll = !ticket.registration
         while (true) {
-            delay(interval * 1000)
+            if (waitBeforePoll) delay(interval * 1000)
+            waitBeforePoll = true
             if (System.currentTimeMillis() >= ticket.until) throw OAuthFailure("expired_token", "确认码已过期，请重新登录")
             val reply = poll(ticket.device)
             val brand = reply.optJSONObject("user_info")?.optString("tenant_brand")
@@ -67,15 +83,36 @@ internal class ImLogin(private val api: ImApi) {
             when (reply.optString("error")) {
                 "authorization_pending" -> continue
                 "slow_down" -> interval += 5
-                else -> return checked(reply)
+                else -> if (complete(checked(reply))) return reply
             }
         }
     }
 
-    suspend fun register(pending: Approval? = null, show: suspend (Approval) -> Unit): AppKeys {
-        val ticket = pending ?: ticket(api.form(registration, mapOf("action" to "begin", "archetype" to "PersonalAgent",
-            "auth_method" to "client_secret", "request_user_info" to "open_id tenant_brand")), true)
-        val keys = approve(ticket, show) { api.form(registration, mapOf("action" to "poll", "device_code" to it)) }
+    suspend fun register(bootstrap: ImApi, pending: Approval? = null, show: suspend (Approval) -> Unit): AppKeys {
+        require(bootstrap.brand == Brand.FEISHU)
+        // Lark registrations from older builds used a different issuer. Start those again.
+        val saved = pending?.takeIf { it.registrationPollBrand != null || api.brand == Brand.FEISHU }
+        val ticket = saved?.let(::registrationWithCode) ?: run {
+            val begin = bootstrap.form(registration, mapOf("action" to "begin", "archetype" to "PersonalAgent",
+                "auth_method" to "client_secret", "request_user_info" to "open_id tenant_brand"))
+            registrationWithCode(ticket(begin, true))
+                ?: throw OAuthFailure("invalid_response", "开放平台没有返回注册确认码，请重新登录")
+        }
+        var pollApi = if (ticket.registrationPollBrand == Brand.LARK) api else bootstrap
+        val keys = approve(ticket, show, complete = {
+            !it.isNull("client_id") && it.optString("client_id").isNotBlank() &&
+                !it.isNull("client_secret") && it.optString("client_secret").isNotBlank()
+        }) { device ->
+            val params = mapOf("action" to "poll", "device_code" to device)
+            val reply = pollApi.form(registration, params)
+            if (api.brand == Brand.LARK && pollApi.brand == Brand.FEISHU &&
+                reply.optJSONObject("user_info")?.optString("tenant_brand").equals("lark", ignoreCase = true)) {
+                pollApi = api
+                show(ticket.copy(registrationPollBrand = Brand.LARK))
+                pollApi.form(registration, params)
+            } else reply
+        }
+        if (pollApi.brand != api.brand) throw OAuthFailure("wrong_brand", "应用凭证所属平台与所选账号不同，请重新登录")
         return AppKeys(keys.getString("client_id"), keys.getString("client_secret"))
     }
 

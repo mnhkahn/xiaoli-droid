@@ -110,7 +110,9 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         suspend fun show(it: Approval) = withContext(Dispatchers.Main.immediate) { persist(account.copy(pending = it)); approval = it }
         val pending = account.pending?.takeIf { resumePending && it.until > System.currentTimeMillis() }
         if (pending == null && account.pending != null) persist(account.copy(pending = null))
-        val keys = account.keys ?: withContext(Dispatchers.IO) { flow.register(pending?.takeIf { it.registration }, ::show) }.also {
+        val keys = account.keys ?: withContext(Dispatchers.IO) {
+            flow.register(platform(Brand.FEISHU), pending?.takeIf { it.registration }, ::show)
+        }.also {
             persist(LoginState(keys = it))
         }
         approval = null
