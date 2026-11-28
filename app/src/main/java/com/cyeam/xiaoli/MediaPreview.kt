@@ -17,6 +17,15 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
+internal fun decodeImage(file: File, maxSide: Int): android.graphics.Bitmap? {
+    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.path, options)
+    options.inJustDecodeBounds = false
+    options.inSampleSize = 1
+    while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > maxSide) options.inSampleSize *= 2
+    return BitmapFactory.decodeFile(file.path, options)
+}
+
 @Composable
 internal fun MediaPreview(file: File, type: String, notice: (String) -> Unit, close: () -> Unit) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -47,12 +56,7 @@ internal fun MediaPreview(file: File, type: String, notice: (String) -> Unit, cl
     LaunchedEffect(file) {
         if (type == "image") {
             image = withContext(Dispatchers.IO) {
-                val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeFile(file.path, options)
-                options.inJustDecodeBounds = false
-                options.inSampleSize = 1
-                while (maxOf(options.outWidth, options.outHeight) / options.inSampleSize > 2048) options.inSampleSize *= 2
-                BitmapFactory.decodeFile(file.path, options)
+                decodeImage(file, 2048)
             }
             if (image == null) { onError("无法预览这种图片格式，可保存原文件"); onClose() }
         }

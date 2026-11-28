@@ -120,6 +120,7 @@ class PlatformChatTest {
                         .put(json("name" to "李老师", "chat_id" to peerId, "chat_mode" to "p2p",
                             "p2p_target_type" to "bot", "p2p_target_id" to "ou_agent"))
                         .put(json("name" to "群聊", "chat_id" to "oc_group", "chat_mode" to "group"))))
+                    url.encodedPath.endsWith("/reactions/batch_query") -> success(json("success_msg_reaction_counts" to JSONArray()))
                     request.method == "POST" -> {
                         val body = JSONObject(request.body.readUtf8())
                         sent.add(token to body.getString("receive_id"))
@@ -293,6 +294,138 @@ class PlatformChatTest {
                 ui.onNodeWithText("应用缺少读取快捷菜单的权限 · 重试").performClick()
                 waitText("/新版")
             }
+        } finally { ui.runOnIdle { model.home() } }
+    }
+
+    private fun existingConversation(): ChatModel {
+        val store = ImStore(app)
+        store.write(Brand.LARK, LoginState(AppKeys("app", "test"), UserToken("uat", "refresh",
+            System.currentTimeMillis() + 3_600_000), Peer("oc_agent", "李老师")))
+        store.active = Brand.LARK
+        lateinit var model: ChatModel
+        ui.runOnIdle { model = ChatModel(app, ::api) }
+        ui.setContent { MaterialTheme { ChatScreen(model, listOf(Brand.LARK), onCheckUpdate = {}) } }
+        return model
+    }
+
+    @Test fun historyShowsCardPagesAndLoadsBothOlderImagesInline() {
+        val headers = JSONArray().put(json("name" to "c0", "display_name" to "作业"))
+            .put(json("name" to "c1", "display_name" to "状态"))
+        val rows = JSONArray().apply { for (i in 1..8) put(json("c0" to "练习 $i", "c1" to if (i < 3) "待完成" else "已完成")) }
+        val summary = "今天一共有 8 项作业，还有 2 项没完成，另外 6 项已经完成了。"
+        val card = json("schema" to "2.0", "header" to json("title" to json("content" to "今天的作业情况")),
+            "body" to json("elements" to JSONArray().put(json("tag" to "column_set", "columns" to JSONArray().put(
+                json("tag" to "column", "elements" to JSONArray().put(json("tag" to "markdown", "content" to summary))))))
+                .put(json("tag" to "table", "page_size" to 5, "columns" to headers, "rows" to rows))))
+        fun item(id: String, type: String, content: JSONObject) = json("message_id" to id, "msg_type" to type,
+            "chat_id" to "oc_agent", "sender" to json("sender_type" to "app"), "body" to json("content" to content.toString()))
+        val requests = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val imageAvailable = java.util.concurrent.atomic.AtomicBoolean(false)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val url = request.requestUrl!!
+                if (request.getHeader("Authorization") != "Bearer uat") return MockResponse().setResponseCode(403)
+                return when {
+                    url.encodedPath.endsWith("/im/v1/messages") && url.queryParameter("card_msg_content_type") == "user_card_content" ->
+                        if (url.queryParameter("page_token") == null) success(json("has_more" to true, "page_token" to "older",
+                            "items" to JSONArray().put(item("om_card","interactive",card))))
+                        else success(json("items" to JSONArray().put(item("om_photo","image",json("image_key" to "img_one")))
+                            .put(item("om_post","post",json("title" to "作业图", "content" to JSONArray().put(JSONArray()
+                                .put(json("tag" to "img", "image_key" to "img_two"))))))))
+                    url.encodedPath.endsWith("/resources/img_one") || url.encodedPath.endsWith("/resources/img_two") -> {
+                        requests.add(url.encodedPath)
+                        if (url.encodedPath.endsWith("/img_two") && !imageAvailable.get())
+                            return MockResponse().setResponseCode(503)
+                        if (url.queryParameter("type") != "image") return MockResponse().setResponseCode(400)
+                        val bytes = instrumentation.context.assets.open("media/sample.png").use { it.readBytes() }
+                        MockResponse().setHeader("Content-Type","image/png").setBody(Buffer().write(bytes))
+                    }
+                    url.encodedPath.endsWith("/reactions/batch_query") -> success(JSONObject())
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val model = existingConversation()
+        try {
+            waitText(summary)
+            ui.onNodeWithText("今天的作业情况").assertIsDisplayed()
+            ui.onNodeWithText("练习 5").assertExists()
+            ui.onNodeWithText("下一页").performClick()
+            ui.onNodeWithText("2/2").assertIsDisplayed()
+            ui.onNodeWithText("练习 8").assertIsDisplayed()
+            ui.onNodeWithText("上一页").performClick()
+            ui.onNodeWithText("1/2").assertExists()
+            ui.onNodeWithTag("chat-history").performScrollToNode(hasText("查看更早的消息"))
+            ui.onNodeWithText("查看更早的消息").performClick()
+            ui.waitUntil(10_000) { model.messages.size == 3 }
+            for ((id, key) in listOf("om_photo" to "img_one", "om_post" to "img_two")) {
+                ui.onNodeWithTag("chat-history").performScrollToKey(id)
+                ui.waitUntil(10_000) { requests.contains("/open-apis/im/v1/messages/$id/resources/$key") }
+                if (key == "img_two") {
+                    val retry = "重新加载图片 · 附件下载失败（HTTP 503）"
+                    waitText(retry)
+                    imageAvailable.set(true)
+                    ui.onNodeWithText(retry).performScrollTo().performClick()
+                }
+                val node = ui.onNodeWithTag("image-$id-$key")
+                ui.waitUntil(10_000) { ui.onAllNodesWithTag("image-$id-$key").fetchSemanticsNodes().isNotEmpty() }
+                node.performScrollTo().assertIsDisplayed().performClick()
+                waitText("关闭")
+                ui.onNodeWithText("关闭").performClick()
+            }
+        } finally { ui.runOnIdle { model.home() } }
+    }
+
+    @Test fun botReactionAppearsAndDisappearsAndUsersCanToggleTheirOwn() {
+        val working = java.util.concurrent.atomic.AtomicBoolean(false)
+        val liked = java.util.concurrent.atomic.AtomicBoolean(false)
+        val requestCount = java.util.concurrent.atomic.AtomicInteger()
+        val heart = json("operator" to json("operator_type" to "user", "operator_id" to "ou_self"),
+            "reaction_id" to "mine/+=", "emoji_type" to "HEART")
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                if (request.getHeader("Authorization") != "Bearer uat") return MockResponse().setResponseCode(403)
+                val path = request.requestUrl!!.encodedPath
+                return when {
+                    path.endsWith("/user_info") -> success(json("name" to "我", "open_id" to "ou_self"))
+                    path.endsWith("/im/v1/messages") -> success(json("items" to JSONArray().put(json(
+                        "message_id" to "om_work", "msg_type" to "text", "sender" to json("sender_type" to "user"),
+                        "body" to json("content" to json("text" to "今天还有啥作业没完成？").toString())))))
+                    path.endsWith("/reactions/batch_query") -> {
+                        val counts = JSONArray()
+                        if (working.get()) counts.put(json("reaction_type" to "Typing", "count" to "1"))
+                        if (liked.get()) counts.put(json("reaction_type" to "HEART", "count" to "1"))
+                        requestCount.incrementAndGet()
+                        success(json("success_msg_reaction_counts" to JSONArray().put(json("message_id" to "om_work", "reaction_count" to counts)),
+                            "success_msg_reaction_details" to JSONArray().put(json("message_id" to "om_work", "message_reaction_items" to
+                                if (liked.get()) JSONArray().put(heart) else JSONArray()))))
+                    }
+                    path.endsWith("/om_work/reactions") && request.method == "GET" ->
+                        success(json("items" to if (liked.get()) JSONArray().put(heart) else JSONArray()))
+                    path.endsWith("/om_work/reactions") && request.method == "POST" -> {
+                        if (JSONObject(request.body.readUtf8()).getJSONObject("reaction_type").getString("emoji_type") != "HEART")
+                            return MockResponse().setResponseCode(400)
+                        liked.set(true); success(heart)
+                    }
+                    request.method == "DELETE" && request.requestUrl!!.pathSegments.last() == "mine/+=" -> {
+                        liked.set(false); success(JSONObject())
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val model = existingConversation()
+        try {
+            waitText("今天还有啥作业没完成？")
+            ui.waitUntil(8000) { requestCount.get() > 0 }
+            working.set(true); waitText("⌨️ 输入中 1")
+            working.set(false)
+            ui.waitUntil(8000) { ui.onAllNodesWithText("⌨️ 输入中 1").fetchSemanticsNodes().isEmpty() }
+            ui.onNodeWithContentDescription("回复表情").performClick()
+            ui.onNodeWithText("❤️").performClick()
+            waitText("❤️ 1")
+            ui.onNodeWithText("❤️ 1").performClick()
+            ui.waitUntil(8000) { !liked.get() && ui.onAllNodesWithText("❤️ 1").fetchSemanticsNodes().isEmpty() }
         } finally { ui.runOnIdle { model.home() } }
     }
 

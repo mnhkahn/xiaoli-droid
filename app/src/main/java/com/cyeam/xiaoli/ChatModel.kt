@@ -2,6 +2,10 @@ package com.cyeam.xiaoli
 
 import android.app.Application
 import android.net.Uri
+import android.graphics.Bitmap
+import android.util.LruCache
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -43,6 +47,14 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
     var menuError by mutableStateOf<String?>(null); private set
     private var menuJob: Job? = null
     var messages by mutableStateOf(emptyList<ImMessage>()); private set
+    var reactions by mutableStateOf(emptyMap<String, List<EmojiReaction>>()); private set
+    var reactionError by mutableStateOf<String?>(null); private set
+    var changingReaction by mutableStateOf(false); private set
+    private val reactionLock = Mutex()
+    private val imageSlots = Semaphore(3)
+    private val thumbnails = object : LruCache<Pair<String, String>, Bitmap>(8 * 1024 * 1024) {
+        override fun sizeOf(key: Pair<String, String>, value: Bitmap) = value.byteCount
+    }
     var older by mutableStateOf<String?>(null); private set
     var error by mutableStateOf<String?>(null); private set
     var historyError by mutableStateOf<String?>(null); private set
@@ -66,6 +78,10 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         menuJob = null
         messages = emptyList()
         older = null
+        reactions = emptyMap()
+        reactionError = null
+        changingReaction = false
+        thumbnails.evictAll()
         edit("")
     }
 
@@ -322,12 +338,73 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         }
     }
 
-    fun preview(message: ImMessage, ready: (File) -> Unit) {
-        if (message !in messages) return
+    private suspend fun updateReactions(ids: List<String>) {
+        val owner = session
+        val openId = userProfile?.openId
+        for (batch in ids.chunked(20)) {
+            val changes = withToken { client, token -> client.reactions(token, batch, openId) }
+            if (owner !== session) return
+            reactions = (reactions + changes).filterValues { it.isNotEmpty() }
+        }
+        reactionError = null
+    }
+
+    suspend fun observeReactions(visible: List<String>) {
+        val owner = session
+        while (owner === session && signedIn) {
+            val ids = visible.filter { id -> messages.any { it.id == id && !it.deleted } }
+            if (ids.isEmpty()) return
+            try { reactionLock.withLock { updateReactions(ids) } }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (owner === session) reactionError = if (e is ImFailure && e.code == 99991672)
+                    "当前授权无法查看消息表情" else "表情同步暂时不可用"
+            }
+            delay(if (reactionError == null) 1500L else 10000L)
+        }
+    }
+
+    fun toggleReaction(messageId: String, type: String) {
+        if (changingReaction || messages.none { it.id == messageId && !it.deleted }) return
+        changingReaction = true
+        val owner = session
+        owner.launch {
+            try {
+                reactionLock.withLock {
+                    val id = userProfile?.openId ?: withToken { client, token -> client.userProfile(token) }.also { userProfile = it }.openId
+                    require(!id.isNullOrEmpty()) { "无法确认当前用户，请重新登录后再试" }
+                    withToken { client, token -> client.toggleReaction(token, messageId, type, id) }
+                    updateReactions(listOf(messageId))
+                }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { notice(e.message ?: "更新表情失败") }
+            finally { if (owner === session) changingReaction = false }
+        }
+    }
+
+    suspend fun thumbnail(message: ImMessage, resource: Resource): Bitmap = imageSlots.withPermit {
+        require(resource.type == "image" && messages.any { it.id == message.id && it.contains(resource) })
+        val key = message.id to resource.key
+        thumbnails.get(key)?.let { return@withPermit it }
+        val owner = session
+        val bitmap = withToken { client, token ->
+            val file = File.createTempFile("thumb-", ".tmp", getApplication<Application>().cacheDir)
+            try {
+                file.outputStream().use { client.download(token, message, it, resource) }
+                decodeImage(file, 768) ?: throw java.io.IOException("图片格式无法预览")
+            } finally { file.delete() }
+        }
+        if (session !== owner) throw CancellationException()
+        thumbnails.put(key, bitmap)
+        bitmap
+    }
+
+    fun preview(message: ImMessage, resource: Resource, ready: (File) -> Unit) {
+        if (messages.none { it.id == message.id && it.contains(resource) }) return
         work {
             val file = File.createTempFile("preview-", ".tmp", getApplication<Application>().cacheDir)
             try {
-                withToken { client, token -> file.outputStream().use { client.download(token, message, it) } }
+                withToken { client, token -> file.outputStream().use { client.download(token, message, it, resource) } }
                 ready(file)
             } catch (e: Exception) { file.delete(); throw e }
         }

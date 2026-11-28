@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-RELEASE_NOTES = '聊天输入框上方展示飞书或 Lark 已发布的快捷命令。点开分组即可发送给已连接的智能体，输入框中的草稿会保留。'
+RELEASE_NOTES = '历史图片可直接查看，作业卡片支持阅读正文和翻页。聊天会同步李老师的表情，也可以添加或撤销自己的表情。'
 
 def make_manifest(apk, version, code, tag, pgyer):
     return {'versionName':version,'versionCode':int(code),'apkUrl':f'https://github.com/mnhkahn/xiaoli-droid/releases/download/{tag}/xiaoli.apk','sha256':hashlib.sha256(apk.read_bytes()).hexdigest(),'pgyerUrl':pgyer,'notes':RELEASE_NOTES}

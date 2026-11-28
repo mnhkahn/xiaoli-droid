@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.material.icons.Icons
@@ -21,6 +24,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.font.FontWeight
@@ -185,25 +189,45 @@ private fun ColumnScope.Conversation(model: ChatModel, peerName: String) {
     }
     model.historyError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     val context = LocalContext.current
-    LazyColumn(Modifier.weight(1f).fillMaxWidth(), reverseLayout = true,
+    val listState = rememberLazyListState()
+    LaunchedEffect(model, lifecycle, model.brand, model.selected) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            snapshotFlow { listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String } }
+                .distinctUntilChanged().collectLatest { model.observeReactions(it) }
+        }
+    }
+    model.reactionError?.let { Text(it, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelSmall) }
+    LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("chat-history"), state = listState, reverseLayout = true,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(model.messages, key = { it.id }) { msg ->
             MessageBubble(msg.sender, if (msg.sender == Sender.USER) model.userProfile else model.botProfile,
                 peerName) {
-                SelectionContainer { Text(msg.text) }
+                fun openImage(resource: Resource) = model.preview(msg, resource) { preview = it to "image" }
+                if (msg.blocks.isNotEmpty()) {
+                    for (block in msg.blocks) when (block) {
+                        is MessageBlock.Paragraph -> SelectionContainer { Text(block.value,
+                            Modifier.padding(vertical = 2.dp), fontWeight = if (block.heading) FontWeight.Bold else FontWeight.Normal,
+                            color = if (block.heading) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
+                        is MessageBlock.Table -> CardTable(block)
+                        is MessageBlock.Picture -> HistoryImage(model, msg, block.resource) { openImage(block.resource) }
+                    }
+                } else if (msg.resource?.type == "image") {
+                    HistoryImage(model, msg, msg.resource) { openImage(msg.resource) }
+                } else SelectionContainer { Text(msg.text) }
                 val link = android.util.Patterns.WEB_URL.matcher(msg.text).let { if (it.find()) it.group() else null }
                 if (link != null && link.startsWith("https://")) TextButton(onClick = {
                     try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
                     catch (_: ActivityNotFoundException) { model.notice("没有可用的浏览器") }
                 }) { Text("打开链接") }
                 msg.resource?.let { resource ->
-                    if (msg.type in setOf("image", "audio"))
-                        TextButton(onClick = { model.preview(msg) { preview = it to msg.type } }, enabled = !model.busy) {
-                            Text(if (msg.type == "image") "查看图片" else "播放语音")
+                    if (msg.type == "audio")
+                        TextButton(onClick = { model.preview(msg, resource) { preview = it to msg.type } }, enabled = !model.busy) {
+                            Text("播放语音")
                         }
                     TextButton(onClick = { savingId = msg.id; save.launch(resource.name.substringAfterLast('/').substringAfterLast('\\')) },
                         enabled = !model.busy) { Text("保存附件") }
                 }
+                if (!msg.deleted) MessageReactions(model, msg)
             }
         }
         if (model.older != null) item { TextButton(onClick = model::loadOlder, enabled = !model.busy) { Text("查看更早的消息") } }

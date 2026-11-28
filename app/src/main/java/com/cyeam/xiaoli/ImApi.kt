@@ -28,11 +28,15 @@ internal enum class Brand(val title: String, val domain: String, val appScheme: 
 }
 
 internal data class Peer(val id: String, val name: String)
-internal data class Profile(val name: String, val avatar: String?)
+internal data class Profile(val name: String, val avatar: String?, val openId: String? = null)
 internal data class AppBot(val appId: String, val openId: String, val name: String, val avatar: String? = null)
 internal data class Resource(val key: String, val type: String, val name: String)
 internal enum class Sender { USER, BOT, OTHER }
-internal data class ImMessage(val id: String, val text: String, val resource: Resource?, val sender: Sender, val type: String)
+internal data class ImMessage(val id: String, val text: String, val resource: Resource?, val sender: Sender, val type: String,
+    val blocks: List<MessageBlock> = emptyList(), val deleted: Boolean = false) {
+    fun contains(resource: Resource) = !deleted && (this.resource == resource || MessageBlock.Picture(resource) in blocks)
+}
+internal data class EmojiReaction(val type: String, val count: Int, val ownId: String? = null)
 internal data class Messages(val items: List<ImMessage>, val next: String?)
 internal class ImFailure(val code: Int, reason: String) : IOException("开放平台 $code · $reason")
 
@@ -76,6 +80,7 @@ internal fun decodeMessage(item: JSONObject): ImMessage {
         }
         else -> null
     }
+    val blocks = if (item.optBoolean("deleted")) emptyList() else messageBlocks(type, body)
     val message = when {
         item.optBoolean("deleted") -> "消息已撤回"
         type == "text" -> body.optString("text")
@@ -87,6 +92,7 @@ internal fun decodeMessage(item: JSONObject): ImMessage {
             else label.ifBlank { "位置" }
         }
         resource != null -> resource.name
+        blocks.isNotEmpty() -> blocks.filterIsInstance<MessageBlock.Paragraph>().joinToString("\n") { it.value }
         else -> buildList { readableParts(body, this) }.distinct().joinToString("\n").ifBlank { "[$type 消息]" }
     }
     val sender = when (item.optJSONObject("sender")?.optString("sender_type")) {
@@ -94,7 +100,7 @@ internal fun decodeMessage(item: JSONObject): ImMessage {
         "app", "bot" -> Sender.BOT
         else -> Sender.OTHER
     }
-    return ImMessage(item.getString("message_id"), message, resource.takeUnless { item.optBoolean("deleted") }, sender, type)
+    return ImMessage(item.getString("message_id"), message, resource.takeUnless { item.optBoolean("deleted") }, sender, type, blocks, item.optBoolean("deleted"))
 }
 
 internal class ImApi(
@@ -177,7 +183,7 @@ internal class ImApi(
         val request = Request.Builder().url(open.newBuilder().encodedPath("/open-apis/authen/v1/user_info").build())
             .header("Authorization", "Bearer $token").build()
         val user = data(request)
-        return Profile(user.optString("name").ifBlank { "我" }, user.avatarUrl("avatar_middle", "avatar_thumb", "avatar_url"))
+        return Profile(user.optString("name").ifBlank { "我" }, user.avatarUrl("avatar_middle", "avatar_thumb", "avatar_url"), user.optString("open_id").takeIf(String::isNotBlank))
     }
 
     fun appChat(token: String, bot: AppBot): Peer {
@@ -206,10 +212,55 @@ internal class ImApi(
 
     fun messages(token: String, peer: Peer, cursor: String? = null): Messages {
         val params = mutableMapOf("container_id_type" to "chat", "container_id" to peer.id,
-            "sort_type" to "ByCreateTimeDesc", "page_size" to "50")
+            "sort_type" to "ByCreateTimeDesc", "page_size" to "50", "card_msg_content_type" to "user_card_content")
         cursor?.let { params["page_token"] = it }
         val page = data(request(token, "messages", params))
         return Messages(page.rows().filter { it.optString("chat_id", peer.id) == peer.id }.map(::decodeMessage), page.nextToken())
+    }
+
+    fun reactions(token: String, ids: List<String>, openId: String?): Map<String, List<EmojiReaction>> {
+        require(ids.size in 1..20)
+        val queries = JSONArray().apply { ids.forEach { put(json("message_id" to it)) } }
+        val body = json("queries" to queries, "page_size_per_message" to 10)
+        val result = data(request(token, "messages/reactions/batch_query", emptyMap(),
+            body.toString().toRequestBody("application/json".toMediaType())))
+        val failed = result.optJSONArray("fail_msg_reaction_details").objects().map { it.optString("message_id") }.toSet()
+        val details = result.optJSONArray("success_msg_reaction_details").objects().associateBy { it.optString("message_id") }
+        val counts = result.optJSONArray("success_msg_reaction_counts").objects().associateBy { it.optString("message_id") }
+        return ids.filterNot(failed::contains).associateWith { id ->
+            val records = details[id]?.optJSONArray("message_reaction_items").objects()
+            val totals = counts[id]?.optJSONArray("reaction_count")?.objects()?.associate {
+                it.optString("reaction_type") to it.optInt("count")
+            } ?: records.groupingBy { it.optString("emoji_type") }.eachCount()
+            totals.mapNotNull { (type, total) ->
+                if (type.isBlank() || total <= 0) return@mapNotNull null
+                val own = records.firstOrNull {
+                    val operator = it.optJSONObject("operator")
+                    it.optString("emoji_type") == type && operator?.optString("operator_type") == "user" &&
+                        operator.optString("operator_id") == openId
+                }
+                EmojiReaction(type, total, own?.optString("reaction_id")?.takeIf(String::isNotBlank))
+            }
+        }
+    }
+
+    fun toggleReaction(token: String, messageId: String, type: String, openId: String) {
+        val path = "messages/$messageId/reactions"
+        val params = mapOf("reaction_type" to type, "user_id_type" to "open_id", "page_size" to "50")
+        // The bound single chat has two participants. Re-read before toggling, including after a reconnect.
+        val records = data(request(token, path, params)).rows()
+        val mine = records.firstOrNull { row ->
+            val op = row.optJSONObject("operator")
+            op?.optString("operator_type") == "user" && op.optString("operator_id") == openId
+        }
+        if (mine == null) {
+            val body = json("reaction_type" to json("emoji_type" to type))
+            response(request(token, path, emptyMap(), body.toString().toRequestBody("application/json".toMediaType())))
+        } else {
+            val base = request(token, path, emptyMap())
+            val url = base.url.newBuilder().addPathSegment(mine.getString("reaction_id")).build()
+            response(base.newBuilder().url(url).delete().build())
+        }
     }
 
     fun send(token: String, peer: Peer, type: String, content: JSONObject, uuid: String) {
@@ -234,8 +285,8 @@ internal class ImApi(
         return json(key to data(request(token, "${field}s", emptyMap(), form)).getString(key))
     }
 
-    fun download(token: String, message: ImMessage, output: OutputStream) {
-        val res = requireNotNull(message.resource)
+    fun download(token: String, message: ImMessage, output: OutputStream, res: Resource = requireNotNull(message.resource)) {
+        require(message.contains(res))
         require(listOf(message.id, res.key).all { it.matches(Regex("[A-Za-z0-9_-]+")) })
         var req = request(token, "messages/${message.id}/resources/${res.key}", mapOf("type" to res.type))
         repeat(5) {
@@ -250,12 +301,12 @@ internal class ImApi(
                     req = Request.Builder().url(next).build()
                 } else {
                     val body = response.body ?: throw IOException("附件为空")
-                    if (!response.isSuccessful) throw IOException("附件下载失败（HTTP ${response.code}）")
                     if (response.header("Content-Disposition") == null && body.contentType()?.subtype == "json") {
                         val status = runCatching { JSONObject(response.peekBody(16_384).string()) }.getOrNull()
                         if (status != null && status.has("msg") && status.optInt("code", 0) != 0)
                             throw ImFailure(status.getInt("code"), status.optString("msg").take(220))
                     }
+                    if (!response.isSuccessful) throw IOException("附件下载失败（HTTP ${response.code}）")
                     body.byteStream().copyTo(output)
                     return
                 }
