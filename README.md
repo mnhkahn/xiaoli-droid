@@ -23,7 +23,7 @@ Android 10 及以上的飞书和 Lark 单聊客户端。应用 ID 为 `com.cyeam
 - 录音使用 Ogg Opus，通过平台语音消息发送并在小李内播放。已有的 WAV、MP3 等也可以作为文件发送。
 - 位置通过「加号 → 当前位置」插入坐标和地图链接到草稿，点「发送」后才发出。收到的位置消息也可以打开地图链接。发出的是文本和链接。
 - 作业卡片显示引用、标题、摘要和分页表格。点右下角箭头翻页，点被省略的单元格可查看全文。
-- 可见消息会同步平台表情。李老师开始处理时加上的表情会出现在对应消息下，撤销后消失。长按消息打开底部面板，点快捷表情即可回应，再点自己的回应可撤销。快捷表情、输入面板和常见消息回应使用随 APK 打包的 [Microsoft Fluent Emoji](https://github.com/microsoft/fluentui-emoji)，采用 [MIT 许可](app/src/main/assets/licenses/fluent-emoji.txt)。
+- 发送成功后会自动滚到最新消息。李老师回应时，表情和名字一起显示在原消息气泡内，撤销后消失。长按消息打开底部面板，点快捷表情即可回应，再点自己的回应可撤销。快捷表情、输入面板和常见消息回应使用随 APK 打包的 [Microsoft Fluent Emoji](https://github.com/microsoft/fluentui-emoji)，采用 [MIT 许可](app/src/main/assets/licenses/fluent-emoji.txt)。
 - 面板支持引用回复、Pin / 移除 Pin、在本机置顶消息和添加任务。回复和 Pin 直接同步到当前会话。本机置顶保存于当前连接，点会话顶部可定位原消息。
 - 添加任务时可修改标题，原消息作为备注，负责人为当前用户。首次使用若缺少权限，在应用后台开通并发布用户权限 `task:task:writeonly`，再点「授权添加任务」。
 

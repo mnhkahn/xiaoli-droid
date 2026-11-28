@@ -417,9 +417,110 @@ class PlatformChatTest {
         } finally { ui.runOnIdle { model.home() } }
     }
 
+    @Test fun sentMessagesAndReactionsStayAboveKeyboardWithoutPullingReadersFromHistory() {
+        val stage = java.util.concurrent.atomic.AtomicInteger(0)
+        val sent = java.util.concurrent.atomic.AtomicBoolean(false)
+        val text = "今天作业写完了吗？"
+        val reactor = json("emoji_type" to "Typing", "reaction_id" to "rx_bot",
+            "operator" to json("operator_type" to "app", "operator_id" to "app"))
+        val menus = JSONArray().apply {
+            listOf("会话工具", "作业与提醒", "设备与播报").forEachIndexed { index, group ->
+                put(json("menu_id" to "g$index", "default_name" to group, "menu_content_type" to 3))
+                put(json("menu_id" to "c$index", "parent_menu_id" to "g$index", "default_name" to "查看", "menu_content_type" to 4))
+            }
+        }
+        fun item(id: String, label: String, author: String = "app") = json("chat_id" to "oc_agent", "message_id" to id,
+            "msg_type" to "text", "sender" to json("sender_type" to author), "body" to json("content" to json("text" to label).toString()))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.requestUrl!!.encodedPath
+                return when {
+                    path.endsWith("/tenant_access_token/internal") -> MockResponse().setBody(json("code" to 0, "tenant_access_token" to "tenant").toString())
+                    path.endsWith("/bot/v3/info") -> MockResponse().setBody(json("code" to 0, "bot" to
+                        json("open_id" to "ou_bot", "app_name" to "李老师")).toString())
+                    path.endsWith("/applications/app") -> success(json("app" to json("online_version_id" to "v1")))
+                    path.endsWith("/app_versions/v1") -> success(json("app_version" to json("app_id" to "app", "version_id" to "v1",
+                        "ability" to json("bot" to json("bot_menu_enable" to true, "bot_menus" to menus)))))
+                    path.endsWith("/user_info") -> success(json("name" to "嘉嘉", "open_id" to "ou_me"))
+                    path.endsWith("/im/v1/messages") && request.method == "POST" -> {
+                        val body = JSONObject(request.body.readUtf8())
+                        if (body.optString("receive_id") != "oc_agent" || JSONObject(body.getString("content")).optString("text") != text)
+                            return MockResponse().setResponseCode(400)
+                        sent.set(true)
+                        success(json("message_id" to "om_sent"))
+                    }
+                    path.endsWith("/im/v1/messages") -> success(json("items" to JSONArray().apply {
+                        val now = stage.get()
+                        if (now >= 3) put(item("om_later", "稍后到达的回复"))
+                        if (now >= 2) put(item("om_bot", "还有两项作业。"))
+                        if (now >= 1) put(item("om_sent", text, "user"))
+                        repeat(32) { put(item("om_old_$it", "历史消息 $it")) }
+                    }))
+                    path.endsWith("/reactions/batch_query") -> success(json("success_msg_reaction_details" to JSONArray().put(
+                        json("message_id" to "om_sent", "message_reaction_items" to JSONArray().put(reactor)))))
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        fun shell(command: String) = ParcelFileDescriptor.AutoCloseInputStream(
+            instrumentation.uiAutomation.executeShellCommand(command)).bufferedReader().use { it.readText().trim() }
+        val hardKeyboardSetting = shell("settings get secure show_ime_with_hard_keyboard")
+        val model = existingConversation()
+        fun imeVisible() = androidx.core.view.ViewCompat.getRootWindowInsets(ui.activity.window.decorView)
+            ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+        try {
+            shell("settings put secure show_ime_with_hard_keyboard 1")
+            waitText("历史消息 0")
+            ui.onNodeWithContentDescription("返回").assertDoesNotExist()
+            val editor = ui.onNode(hasSetTextAction())
+            editor.performTouchInput { click() }
+            ui.waitUntil(12000) { imeVisible() }
+            val list = ui.onNodeWithTag("chat-history")
+            list.performScrollToKey("om_old_24")
+            ui.onNodeWithText("历史消息 24").assertIsDisplayed()
+            ui.onNodeWithTag("bubble-om_old_0").assertDoesNotExist()
+            editor.performTextInput(text)
+            ui.onNodeWithContentDescription("发送").performClick()
+            ui.waitUntil(8000) { sent.get() && !model.sending }
+            // Even after a stale refresh, the acknowledged send is already onscreen.
+            waitText(text)
+            ui.onNodeWithTag("bubble-om_sent").assertIsDisplayed()
+            stage.set(1)
+            ui.waitUntil(10000) { ui.onAllNodesWithContentDescription("输入中，李老师").fetchSemanticsNodes().isNotEmpty() }
+            val bubble = ui.onNodeWithTag("bubble-om_sent").fetchSemanticsNode().boundsInRoot
+            val history = list.fetchSemanticsNode().boundsInRoot
+            assertTrue(imeVisible())
+            val menuTop = ui.onNodeWithText("会话工具").fetchSemanticsNode().boundsInRoot.top
+            assertTrue("新消息和表情应完全位于快捷菜单和输入框上方", bubble.top >= history.top && bubble.bottom <= history.bottom &&
+                bubble.bottom <= menuTop && menuTop < editor.fetchSemanticsNode().boundsInRoot.top)
+            if (InstrumentationRegistry.getArguments().getString("captureScroll") == "true") {
+                val shot = instrumentation.uiAutomation.takeScreenshot()
+                File(app.cacheDir, "sent-reaction.png").outputStream().use { shot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                shot.recycle()
+            }
+            stage.set(2)
+            waitText("还有两项作业。")
+            ui.onNodeWithTag("bubble-om_bot").assertIsDisplayed()
+            assertEquals(1, model.messages.count { it.id == "om_sent" })
+            list.performScrollToKey("om_old_24")
+            val before = ui.onNodeWithText("历史消息 24").fetchSemanticsNode().boundsInRoot.top
+            stage.set(3)
+            ui.waitUntil(10000) { model.messages.first().id == "om_later" }
+            ui.waitForIdle()
+            assertEquals(before, ui.onNodeWithText("历史消息 24").fetchSemanticsNode().boundsInRoot.top, 1f)
+            ui.onNodeWithTag("bubble-om_later").assertDoesNotExist()
+        } finally {
+            if (hardKeyboardSetting == "null") shell("settings delete secure show_ime_with_hard_keyboard")
+            else shell("settings put secure show_ime_with_hard_keyboard $hardKeyboardSetting")
+            ui.runOnIdle { model.home() }
+        }
+    }
+
     @Test fun botReactionAppearsAndDisappearsAndUsersCanToggleTheirOwn() {
         val working = java.util.concurrent.atomic.AtomicBoolean(false)
         val liked = java.util.concurrent.atomic.AtomicBoolean(false)
+        val bot = json("operator" to json("operator_type" to "app", "operator_id" to "app"),
+            "reaction_id" to "bot-working", "emoji_type" to "Typing")
         val requestCount = java.util.concurrent.atomic.AtomicInteger()
         val heart = json("operator" to json("operator_type" to "user", "operator_id" to "ou_self"),
             "reaction_id" to "mine/+=", "emoji_type" to "HEART")
@@ -439,7 +540,7 @@ class PlatformChatTest {
                         requestCount.incrementAndGet()
                         success(json("success_msg_reaction_counts" to JSONArray().put(json("message_id" to "om_work", "reaction_count" to counts)),
                             "success_msg_reaction_details" to JSONArray().put(json("message_id" to "om_work", "message_reaction_items" to
-                                if (liked.get()) JSONArray().put(heart) else JSONArray()))))
+                                JSONArray().apply { if (working.get()) put(bot); if (liked.get()) put(heart) }))))
                     }
                     path.endsWith("/om_work/reactions") && request.method == "GET" ->
                         success(json("items" to if (liked.get()) JSONArray().put(heart) else JSONArray()))
@@ -460,9 +561,14 @@ class PlatformChatTest {
             waitText("今天还有啥作业没完成？")
             ui.waitUntil(8000) { requestCount.get() > 0 }
             working.set(true)
-            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("输入中 1").fetchSemanticsNodes().isNotEmpty() }
+            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("输入中，李老师").fetchSemanticsNodes().isNotEmpty() }
+            val pill = ui.onNodeWithContentDescription("输入中，李老师").fetchSemanticsNode().boundsInRoot
+            val bubble = ui.onNodeWithTag("bubble-om_work").fetchSemanticsNode().boundsInRoot
+            val body = ui.onNodeWithText("今天还有啥作业没完成？").fetchSemanticsNode().boundsInRoot
+            assertTrue("回应应位于气泡内正文的左下方", pill.left >= bubble.left && pill.right <= bubble.right &&
+                kotlin.math.abs(pill.left - body.left) <= 1f && pill.top >= body.bottom && pill.bottom <= bubble.bottom)
             working.set(false)
-            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("输入中 1").fetchSemanticsNodes().isEmpty() }
+            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("输入中，李老师").fetchSemanticsNodes().isEmpty() }
             ui.onNodeWithContentDescription("回复表情").assertDoesNotExist()
             val question = ui.onNodeWithText("今天还有啥作业没完成？")
             question.performTouchInput { click() }
@@ -470,9 +576,9 @@ class PlatformChatTest {
             question.performTouchInput { longClick() }
             ui.onNodeWithContentDescription("更多表情").performClick()
             ui.onNodeWithContentDescription("爱心").performClick()
-            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("爱心 1").fetchSemanticsNodes().isNotEmpty() }
-            ui.onNodeWithContentDescription("爱心 1").performClick()
-            ui.waitUntil(8000) { !liked.get() && ui.onAllNodesWithContentDescription("爱心 1").fetchSemanticsNodes().isEmpty() }
+            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("爱心，我").fetchSemanticsNodes().isNotEmpty() }
+            ui.onNodeWithContentDescription("爱心，我").performClick()
+            ui.waitUntil(8000) { !liked.get() && ui.onAllNodesWithContentDescription("爱心，我").fetchSemanticsNodes().isEmpty() }
         } finally { ui.runOnIdle { model.home() } }
     }
 

@@ -20,7 +20,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 // Platform reaction identifiers are case-sensitive. Artwork is bundled for offline use.
-internal enum class ChatEmoji(val type: String, val label: String, @DrawableRes val icon: Int, val showLabel: Boolean = false) {
+internal enum class ChatEmoji(val type: String, val label: String, @DrawableRes val icon: Int) {
     OK("OK", "OK", R.drawable.reaction_ok),
     FACEPALM("FACEPALM", "捂脸", R.drawable.reaction_facepalm),
     LAUGH("LOL", "笑哭", R.drawable.reaction_lol),
@@ -31,10 +31,10 @@ internal enum class ChatEmoji(val type: String, val label: String, @DrawableRes 
     HEART("HEART", "爱心", R.drawable.reaction_heart),
     SMILE("SMILE", "微笑", R.drawable.reaction_smile),
     CLAP("CLAP", "鼓掌", R.drawable.reaction_clap),
-    THINK("THINKING", "思考", R.drawable.reaction_thinking, true),
-    TYPING("Typing", "输入中", R.drawable.reaction_typing, true),
-    ON_IT("OnIt", "收到", R.drawable.reaction_onit, true),
-    WAIT("OneSecond", "稍等", R.drawable.reaction_wait, true),
+    THINK("THINKING", "思考", R.drawable.reaction_thinking),
+    TYPING("Typing", "输入中", R.drawable.reaction_typing),
+    ON_IT("OnIt", "收到", R.drawable.reaction_onit),
+    WAIT("OneSecond", "稍等", R.drawable.reaction_wait),
     GRIN("BLUSH", "咧嘴笑", R.drawable.reaction_grin),
     PARTY("PARTY", "庆祝", R.drawable.reaction_party),
     THANKS("THANKS", "感谢", R.drawable.reaction_thanks);

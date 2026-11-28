@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -18,7 +17,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -94,7 +92,6 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
     BackHandler(enabled = brand != null && (!model.signedIn || model.sending)) {
         if (!model.sending) model.home()
     }
-    val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
     Surface(modifier = Modifier.fillMaxSize(),
         color = if (peer == null) MaterialTheme.colorScheme.surface else chatColor(0xffffffff, 0xff191b20)) {
         Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(horizontal = if (peer == null) 20.dp else 0.dp),
@@ -105,9 +102,7 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
                     Text(if (model.signedIn) "连接智能体" else "小李", style = MaterialTheme.typography.headlineMedium,
                         modifier = Modifier.weight(1f), maxLines = 2)
                 } else {
-                    IconButton(onClick = { back?.onBackPressed() }, enabled = !model.sending) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回")
-                    }
+                    Spacer(Modifier.width(48.dp))
                     Row(Modifier.weight(1f), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                         Text(peer.name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
@@ -196,6 +191,23 @@ private fun ColumnScope.Conversation(model: ChatModel, peerName: String) {
     model.historyError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    val newestId = model.messages.firstOrNull()?.id
+    var previousNewest by rememberSaveable { mutableStateOf(newestId) }
+    var handledSends by remember { mutableIntStateOf(model.completedSends) }
+    LaunchedEffect(model.completedSends, newestId) {
+        val sends = model.completedSends
+        if (newestId != null) {
+            // Stable item keys keep the old head in place when a poll prepends messages.
+            val first = listState.firstVisibleItemIndex
+            val followedHead = listState.firstVisibleItemScrollOffset == 0 && (first == 0 ||
+                listState.layoutInfo.visibleItemsInfo.any { it.index == first && it.key == previousNewest })
+            if (handledSends != sends || (previousNewest != newestId && followedHead && !listState.isScrollInProgress)) {
+                listState.scrollToItem(0)
+            }
+            handledSends = sends
+        }
+        previousNewest = newestId
+    }
     val scope = rememberCoroutineScope()
     var actionId by rememberSaveable { mutableStateOf<String?>(null) }
     var sheetHeight by remember(actionId) { mutableIntStateOf(0) }

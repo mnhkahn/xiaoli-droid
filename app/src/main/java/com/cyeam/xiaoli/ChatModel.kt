@@ -8,6 +8,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -43,6 +44,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
     var signedIn by mutableStateOf(false); private set
     var busy by mutableStateOf(false); private set
     var sending by mutableStateOf(false); private set
+    var completedSends by mutableIntStateOf(0); private set
     var selected by mutableStateOf<Peer?>(null); private set
     var userProfile by mutableStateOf<Profile?>(null); private set
     var botProfile by mutableStateOf<Profile?>(null); private set
@@ -50,6 +52,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
     var menuError by mutableStateOf<String?>(null); private set
     private var menuJob: Job? = null
     var messages by mutableStateOf(emptyList<ImMessage>()); private set
+    private val awaitingHistory = mutableSetOf<String>()
     var reactions by mutableStateOf(emptyMap<String, List<EmojiReaction>>()); private set
     var reactionError by mutableStateOf<String?>(null); private set
     var changingReaction by mutableStateOf(false); private set
@@ -76,6 +79,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         approval = null
         busy = false
         sending = false
+        completedSends = 0
         error = null
         historyError = null
         userProfile = null
@@ -84,6 +88,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         menuError = null
         menuJob = null
         messages = emptyList()
+        awaitingHistory.clear()
         older = null
         reactions = emptyMap()
         reactionError = null
@@ -200,6 +205,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
                     if (brand == owner && account.token == token) {
                         persist(reset)
                         messages = emptyList()
+                        awaitingHistory.clear()
                         edit("")
                     } else store.write(owner, reset)
                 }
@@ -228,7 +234,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         val bot = withContext(Dispatchers.IO) { client.appBot(keys) }
         val peer = withToken { im, access -> im.appChat(access, bot) }
         persist(account.copy(peer = peer))
-        botProfile = Profile(bot.name, bot.avatar)
+        botProfile = Profile(bot.name, bot.avatar, bot.openId)
         loadProfiles()
     }
 
@@ -239,7 +245,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         if (botProfile == null) session.launch {
             try {
                 val bot = withContext(Dispatchers.IO) { client.appBot(keys) }
-                botProfile = Profile(bot.name, bot.avatar)
+                botProfile = Profile(bot.name, bot.avatar, bot.openId)
             } catch (e: CancellationException) { throw e }
             catch (_: Exception) { /* The chat name supplies the fallback avatar. */ }
         }
@@ -257,9 +263,19 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         if (selected != peer || !signedIn) return@withLock
         val items = page.items
         if (cursor == null) {
-            val old = messages
-            val contiguous = old.any { m -> items.any { it.id == m.id } }
-            messages = if (contiguous) (items + old).distinctBy { it.id } else items
+            val (acknowledged, old) = messages.partition { it.id in awaitingHistory }
+            val received = items.mapTo(mutableSetOf()) { it.id }
+            awaitingHistory.removeAll(received)
+            val contiguous = old.any { it.id in received }
+            val history = if (contiguous) (items + old).distinctBy { it.id } else items
+            // A successful send can reach this device before it reaches the history endpoint.
+            messages = if (awaitingHistory.isEmpty()) history else history.toMutableList().apply {
+                for (sent in acknowledged.asReversed()) {
+                    if (sent.id !in awaitingHistory) continue
+                    val index = if (sent.createdAt == 0L) 0 else indexOfFirst { it.createdAt <= sent.createdAt }
+                    add(if (index < 0) size else index, sent)
+                }
+            }
             if (!contiguous) older = page.next
         } else {
             messages = (messages + items).distinctBy { it.id }
@@ -417,7 +433,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         taskDraft = editor.copy(needsAuthorization = false)
     }
 
-    private fun send(block: suspend (Peer) -> Unit) {
+    private fun send(block: suspend (Peer) -> ImMessage?) {
         val peer = selected ?: return
         if (sending) return
         sending = true
@@ -425,7 +441,12 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         val own = session
         own.launch {
             try {
-                block(peer)
+                val sent = block(peer)
+                if (sent != null && messages.none { it.id == sent.id }) {
+                    awaitingHistory.add(sent.id)
+                    messages = listOf(sent) + messages
+                }
+                completedSends++
                 try { loadHistory(peer) } catch (e: java.io.IOException) { historyError = e.message }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { notice(e.message ?: "发送失败") }
@@ -452,7 +473,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         send { peer ->
             val parent = target?.let { message(it.id).id }
             withToken { client, access -> client.send(access, peer, "text", json("text" to text), id, parent) }
-            onSent()
+                .also { onSent() }
         }
     }
 
@@ -463,10 +484,25 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
             try {
                 val parent = target?.let { message(it.id).id }
                 val content = withToken { client, access -> client.upload(access, name, body, type, durationMs) }
-                withToken { client, access -> client.send(access, peer, type, content, id, parent) }
-                if (target != null && replyTo == target) setReply(null)
+                withToken { client, access -> client.send(access, peer, type, content, id, parent) }.also {
+                    if (target != null && replyTo == target) setReply(null)
+                }
             } finally { done() }
         }
+    }
+
+    fun reactionByline(entry: EmojiReaction): String {
+        val names = entry.actors.mapNotNull { actor ->
+            when {
+                actor.type == "user" && actor.id == userProfile?.openId -> userProfile?.name ?: "我"
+                (actor.type == "app" && actor.id == account.keys?.id) ||
+                    ((actor.type == "user" || actor.type == "app") && actor.id == botProfile?.openId) -> botProfile?.name ?: selected?.name
+                else -> null
+            }
+        }
+        if (names.isEmpty()) return "${entry.count} 个回应"
+        val label = names.joinToString("、")
+        return if (names.size >= entry.count) label else "$label +${entry.count - names.size}"
     }
 
     private suspend fun updateReactions(ids: List<String>) {

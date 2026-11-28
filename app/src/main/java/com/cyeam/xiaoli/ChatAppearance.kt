@@ -110,20 +110,20 @@ internal fun MessageBubble(model: ChatModel, message: ImMessage, peerName: Strin
                 Avatar(profile, peerName, false)
                 Spacer(Modifier.width(8.dp))
             }
-            Column(Modifier.widthIn(max = bubbleWidth), horizontalAlignment = if (own) Alignment.End else Alignment.Start) {
-                Surface(modifier = gesture.testTag("bubble-${message.id}"), shape = if (card) RoundedCornerShape(10.dp) else RoundedCornerShape(
-                    topStart = if (bot) 4.dp else 14.dp, topEnd = if (own) 4.dp else 14.dp,
-                    bottomStart = 14.dp, bottomEnd = 14.dp),
-                    color = when {
-                        card -> chatColor(0xffffffff, 0xff23262c)
-                        own -> chatColor(0xffd6e5ff, 0xff243e61)
-                        else -> chatColor(0xfff2f3f5, 0xff292c32)
-                    }, border = if (card) BorderStroke(1.dp, chatColor(0xffdfe1e4, 0xff494d55)) else null,
-                    contentColor = chatColor(0xff20242c, 0xffedf0f5)) {
-                    Column(if (card) Modifier.fillMaxWidth() else Modifier.padding(horizontal = 13.dp, vertical = 10.dp),
-                        content = content)
+            Surface(modifier = gesture.widthIn(max = bubbleWidth).testTag("bubble-${message.id}"), shape = if (card) RoundedCornerShape(10.dp) else RoundedCornerShape(
+                topStart = if (bot) 4.dp else 14.dp, topEnd = if (own) 4.dp else 14.dp,
+                bottomStart = 14.dp, bottomEnd = 14.dp),
+                color = when {
+                    card -> chatColor(0xffffffff, 0xff23262c)
+                    own -> chatColor(0xffd6e5ff, 0xff243e61)
+                    else -> chatColor(0xfff2f3f5, 0xff292c32)
+                }, border = if (card) BorderStroke(1.dp, chatColor(0xffdfe1e4, 0xff494d55)) else null,
+                contentColor = chatColor(0xff20242c, 0xffedf0f5)) {
+                Column(if (card) Modifier.fillMaxWidth() else Modifier.padding(horizontal = 13.dp, vertical = 10.dp)) {
+                    content()
+                    if (!message.deleted) MessageReactions(model, message,
+                        if (card) Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp) else Modifier)
                 }
-                MessageReactions(model, message)
             }
             if (own) {
                 Spacer(Modifier.width(8.dp))

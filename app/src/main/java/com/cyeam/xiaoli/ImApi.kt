@@ -33,10 +33,13 @@ internal data class AppBot(val appId: String, val openId: String, val name: Stri
 internal data class Resource(val key: String, val type: String, val name: String)
 internal enum class Sender { USER, BOT, OTHER }
 internal data class ImMessage(val id: String, val text: String, val resource: Resource?, val sender: Sender, val type: String,
-    val blocks: List<MessageBlock> = emptyList(), val deleted: Boolean = false, val parentId: String? = null) {
+    val blocks: List<MessageBlock> = emptyList(), val deleted: Boolean = false, val parentId: String? = null,
+    val createdAt: Long = 0) {
     fun contains(resource: Resource) = !deleted && (this.resource == resource || MessageBlock.Picture(resource) in blocks)
 }
-internal data class EmojiReaction(val type: String, val count: Int, val ownId: String? = null)
+internal data class ReactionActor(val type: String, val id: String)
+internal data class EmojiReaction(val type: String, val count: Int, val ownId: String? = null,
+    val actors: List<ReactionActor> = emptyList())
 internal data class Messages(val items: List<ImMessage>, val next: String?)
 internal class ImFailure(val code: Int, reason: String) : IOException("开放平台 $code · $reason")
 
@@ -106,7 +109,7 @@ internal fun decodeMessage(item: JSONObject): ImMessage {
         else -> Sender.OTHER
     }
     return ImMessage(item.getString("message_id"), message, resource.takeUnless { item.optBoolean("deleted") }, sender, type, blocks, item.optBoolean("deleted"),
-        (item.opt("parent_id") as? String)?.takeIf(String::isNotBlank))
+        (item.opt("parent_id") as? String)?.takeIf(String::isNotBlank), item.optLong("create_time", 0))
 }
 
 internal class ImApi(
@@ -240,12 +243,18 @@ internal class ImApi(
             } ?: records.groupingBy { it.optString("emoji_type") }.eachCount()
             totals.mapNotNull { (type, total) ->
                 if (type.isBlank() || total <= 0) return@mapNotNull null
-                val own = records.firstOrNull {
+                val matching = records.filter { it.optString("emoji_type") == type }
+                val own = matching.firstOrNull {
                     val operator = it.optJSONObject("operator")
-                    it.optString("emoji_type") == type && operator?.optString("operator_type") == "user" &&
+                    operator?.optString("operator_type") == "user" &&
                         operator.optString("operator_id") == openId
                 }
-                EmojiReaction(type, total, own?.optString("reaction_id")?.takeIf(String::isNotBlank))
+                val actors = matching.mapNotNull actor@{ record ->
+                    val operator = record.optJSONObject("operator") ?: return@actor null
+                    val id = operator.optString("operator_id").takeIf(String::isNotBlank) ?: return@actor null
+                    ReactionActor(operator.optString("operator_type"), id)
+                }.distinct()
+                EmojiReaction(type, total, own?.optString("reaction_id")?.takeIf(String::isNotBlank), actors)
             }
         }
     }
@@ -269,15 +278,20 @@ internal class ImApi(
         }
     }
 
-    fun send(token: String, peer: Peer, type: String, content: JSONObject, uuid: String, replyTo: String? = null) {
+    fun send(token: String, peer: Peer, type: String, content: JSONObject, uuid: String, replyTo: String? = null): ImMessage? {
         val body = json("msg_type" to type, "content" to content.toString(), "uuid" to uuid)
-        if (replyTo == null) {
+        val sent = if (replyTo == null) {
             body.put("receive_id", peer.id)
             data(request(token, "messages", mapOf("receive_id_type" to "chat_id"), body.asBody()))
         } else {
             body.put("reply_in_thread", false)
             data(request(token, "messages/$replyTo/reply", emptyMap(), body.asBody()))
         }
+        if (sent.optString("message_id").isBlank() || sent.optString("chat_id", peer.id) != peer.id) return null
+        if (!sent.has("msg_type")) sent.put("msg_type", type)
+        if (!sent.has("body")) sent.put("body", json("content" to content.toString()))
+        if (replyTo != null && !sent.has("parent_id")) sent.put("parent_id", replyTo)
+        return decodeMessage(sent).copy(sender = Sender.USER)
     }
 
     private fun JSONObject.asBody() = toString().toRequestBody("application/json".toMediaType())

@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -19,7 +20,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
@@ -176,22 +178,36 @@ private fun TableCell(value: String, header: Boolean, modifier: Modifier) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-internal fun MessageReactions(model: ChatModel, msg: ImMessage) {
+internal fun MessageReactions(model: ChatModel, msg: ImMessage, modifier: Modifier = Modifier) {
     val entries = model.reactions[msg.id].orEmpty()
     if (entries.isEmpty()) return
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+    val ownMessage = msg.sender == Sender.USER
+    val tint = when {
+        ownMessage -> chatColor(0xffbdd2fb, 0xff324e76)
+        else -> chatColor(0xffe3e6ec, 0xff39404a)
+    }
+    val ink = chatColor(0xff505d72, 0xffd4deed)
+    FlowRow(modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)) {
         entries.forEach { entry ->
-            FilterChip(selected = entry.ownId != null, enabled = !model.changingReaction,
-                onClick = { model.toggleReaction(msg.id, entry.type) },
-                label = {
-                    val emoji = ChatEmoji.byType[entry.type]
-                    if (emoji == null) Text("${entry.type} ${entry.count}")
-                    else Row(Modifier.clearAndSetSemantics { contentDescription = "${emoji.label} ${entry.count}" },
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        EmojiArtwork(emoji, 20.dp, description = null)
-                        Text(if (emoji.showLabel) "${emoji.label} ${entry.count}" else entry.count.toString())
-                    }
-                })
+            val emoji = ChatEmoji.byType[entry.type]
+            val byline = model.reactionByline(entry)
+            val label = emoji?.label ?: entry.type
+            val selected = entry.ownId != null
+            val shape = RoundedCornerShape(50)
+            Row(Modifier.clip(shape).background(tint)
+                .then(if (selected) Modifier.border(1.dp, chatColor(0xff7499dc, 0xff81a8e8), shape) else Modifier)
+                .toggleable(value = selected, enabled = !model.changingReaction, role = Role.Checkbox) {
+                    model.toggleReaction(msg.id, entry.type)
+                }.semantics { contentDescription = "$label，$byline" }
+                .heightIn(min = 24.dp).padding(horizontal = 7.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (emoji != null) EmojiArtwork(emoji, 20.dp, description = null)
+                else Text(entry.type, color = ink, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
+                Box(Modifier.size(1.dp, 12.dp).background(ink.copy(alpha = 0.23f)))
+                Text(byline, color = ink, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 12.sp,
+                    lineHeight = 16.sp, letterSpacing = 0.sp)
+            }
         }
     }
 }
