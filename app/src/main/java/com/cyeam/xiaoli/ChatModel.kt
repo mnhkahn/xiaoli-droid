@@ -36,8 +36,9 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
     var signedIn by mutableStateOf(false); private set
     var busy by mutableStateOf(false); private set
     var sending by mutableStateOf(false); private set
-    var peers by mutableStateOf(emptyList<Peer>()); private set
     var selected by mutableStateOf<Peer?>(null); private set
+    var userProfile by mutableStateOf<Profile?>(null); private set
+    var botProfile by mutableStateOf<Profile?>(null); private set
     var messages by mutableStateOf(emptyList<ImMessage>()); private set
     var older by mutableStateOf<String?>(null); private set
     var error by mutableStateOf<String?>(null); private set
@@ -55,7 +56,8 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         sending = false
         error = null
         historyError = null
-        peers = emptyList()
+        userProfile = null
+        botProfile = null
         messages = emptyList()
         older = null
         edit("")
@@ -88,14 +90,14 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
             signedIn = account.token != null
             selected = account.peer.takeIf { signedIn }
             store.active = value
-            if (signedIn && selected == null) listPeers()
+            if (selected != null) loadProfiles()
+            else if (signedIn) connect()
             else if (!signedIn && (!restore || account.pending != null)) login(resumePending = restore)
         } catch (e: Exception) { signedIn = false; selected = null; notice(e.message ?: "本机授权不可读") }
     }
 
-    fun logout(resetApp: Boolean = false) {
-        clearWork()
-        if (resetApp) store.forget(requireNotNull(brand)) else persist(LoginState(keys = account.keys))
+    fun disconnect() {
+        store.forget(requireNotNull(brand))
         home()
     }
 
@@ -119,7 +121,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         val token = withContext(Dispatchers.IO) { flow.signIn(keys, pending?.takeUnless { it.registration }, ::show) }
         approval = null
         persist(LoginState(keys, token))
-        peers = withToken { client, access -> client.peers(access) }
+        connectAppChat()
     }
 
     private fun work(block: suspend () -> Unit) {
@@ -163,7 +165,6 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
                     if (brand == owner && account.token == token) {
                         persist(reset)
                         messages = emptyList()
-                        peers = emptyList()
                         edit("")
                     } else store.write(owner, reset)
                 }
@@ -184,13 +185,34 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         }
     }
 
-    fun listPeers() = work { peers = withToken { client, access -> client.peers(access) } }
+    fun connect() = work { connectAppChat() }
 
-    fun select(peer: Peer?) {
-        if (sending || (peer != null && peer !in peers)) return
-        clearWork()
+    private suspend fun connectAppChat() {
+        val keys = requireNotNull(account.keys)
+        val client = api
+        val bot = withContext(Dispatchers.IO) { client.appBot(keys) }
+        val peer = withToken { im, access -> im.appChat(access, bot) }
         persist(account.copy(peer = peer))
-        if (peer == null) listPeers()
+        botProfile = Profile(bot.name, bot.avatar)
+        loadProfiles()
+    }
+
+    // Profile requests are optional and run independently of message polling and sending.
+    private fun loadProfiles() {
+        val client = api
+        val keys = requireNotNull(account.keys)
+        if (botProfile == null) session.launch {
+            try {
+                val bot = withContext(Dispatchers.IO) { client.appBot(keys) }
+                botProfile = Profile(bot.name, bot.avatar)
+            } catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* The chat name supplies the fallback avatar. */ }
+        }
+        session.launch {
+            try { userProfile = withToken { im, token -> im.userProfile(token) } }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { /* Keep the local avatar while the profile is unavailable. */ }
+        }
     }
 
     private suspend fun loadHistory(peer: Peer, cursor: String? = null) = historyLock.withLock {

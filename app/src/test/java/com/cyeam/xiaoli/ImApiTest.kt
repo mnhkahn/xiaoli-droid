@@ -137,20 +137,35 @@ class ImApiTest {
         }
     }
 
-    @Test fun listPagesAndIsolateSelectedChatOnBothPlatforms() {
+    @Test fun findOnlyTheAuthorizedBotAcrossPagesOnBothPlatforms() {
         fun success(data: JSONObject) = json("code" to 0, "data" to data)
-        fun row(id: String, mode: String) = json("chat_id" to id, "name" to id, "chat_mode" to mode)
+        fun row(id: String, mode: String, type: String, target: String) = json("chat_id" to id, "name" to "李老师",
+            "chat_mode" to mode, "p2p_target_type" to type, "p2p_target_id" to target)
         for (brand in Brand.entries) MockWebServer().use { server ->
             server.start()
             val api = ImApi(brand, server.url("/"), server.url("/"))
-            server.reply(success(json("items" to JSONArray().put(row("oc_group","group")).put(row("oc_agent","p2p")),
-                "has_more" to true, "page_token" to "page-2")))
-            server.reply(success(json("items" to JSONArray().put(row("oc_other","p2p")))))
-            val peers = api.peers("uat")
-            assertEquals(listOf("oc_agent","oc_other"), peers.map { it.id })
-            assertEquals("p2p", server.takeRequest().requestUrl!!.queryParameter("types"))
+            server.reply(json("code" to 0, "tenant_access_token" to "tat"))
+            server.reply(json("code" to 0, "bot" to json("open_id" to "ou_agent", "app_name" to "李老师")))
+            val bot = api.appBot(AppKeys("cli_agent", "test-secret"))
+            val grant = server.takeRequest()
+            assertEquals("/open-apis/auth/v3/tenant_access_token/internal", grant.path)
+            assertEquals("cli_agent", JSONObject(grant.body.readUtf8()).getString("app_id"))
+            val info = server.takeRequest()
+            assertEquals("/open-apis/bot/v3/info", info.path)
+            assertEquals("Bearer tat", info.getHeader("Authorization"))
+            server.reply(success(json("items" to JSONArray()
+                .put(row("oc_group","group","bot",bot.openId))
+                .put(row("oc_user","p2p","user",bot.openId))
+                .put(row("oc_other","p2p","bot","ou_other")), "has_more" to true, "page_token" to "page-2")))
+            val target = if (brand == Brand.FEISHU) bot.openId else bot.appId
+            server.reply(success(json("items" to JSONArray().put(row("oc_agent","p2p","bot",target)))))
+            val peer = api.appChat("uat", bot)
+            assertEquals(Peer("oc_agent", "李老师"), peer)
+            val list = server.takeRequest()
+            assertEquals("Bearer uat", list.getHeader("Authorization"))
+            assertEquals("p2p", list.requestUrl!!.queryParameter("types"))
+            assertEquals("open_id", list.requestUrl!!.queryParameter("user_id_type"))
             assertEquals("page-2", server.takeRequest().requestUrl!!.queryParameter("page_token"))
-            val peer = peers.first()
             server.reply(success(JSONObject()))
             api.send("uat", peer, "text", json("text" to "你好"), "unique")
             val send = server.takeRequest()
@@ -163,6 +178,27 @@ class ImApiTest {
             assertEquals(1, messages.items.size)
             assertTrue(messages.items.single().text.contains("你好"))
             assertEquals(peer.id, server.takeRequest().requestUrl!!.queryParameter("container_id"))
+        }
+    }
+
+    @Test fun refuseUnidentifiedAmbiguousAndIncompleteChatResults() {
+        MockWebServer().use { server ->
+            server.start()
+            val api = ImApi(Brand.LARK, server.url("/"), server.url("/"))
+            val bot = AppBot("cli_target", "ou_target", "李老师")
+            fun chat(id: String) = json("chat_mode" to "p2p", "chat_id" to id, "name" to bot.name,
+                "p2p_target_type" to "bot", "p2p_target_id" to bot.openId)
+            val first = chat("oc_one")
+            val pages = listOf(
+                json("items" to JSONArray().put(chat("oc_other").apply { remove("p2p_target_id") })),
+                json("items" to JSONArray().put(first).put(chat("oc_two"))),
+                json("items" to JSONArray().put(first), "has_more" to true),
+            )
+            for (page in pages) {
+                server.reply(json("code" to 0, "data" to page))
+                assertThrows(java.io.IOException::class.java) { api.appChat("uat", bot) }
+            }
+            assertEquals(pages.size, server.requestCount)
         }
     }
 }

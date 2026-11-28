@@ -13,6 +13,9 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
@@ -58,13 +61,33 @@ class PlatformChatTest {
         app.getSharedPreferences("open-platform", Context.MODE_PRIVATE).edit().clear().commit()
     }
 
-    @Test fun chooseSingleChatAcrossBothAccounts() {
+    @Test fun authorizationOpensOnlyTheAppChatAcrossBothAccounts() {
+        val imageLoader = coil.ImageLoader.Builder(app).okHttpClient(client).build()
+        coil.Coil.setImageLoader(imageLoader)
         val active = java.util.concurrent.atomic.AtomicReference(Brand.FEISHU)
         val sent = java.util.concurrent.CopyOnWriteArrayList<Pair<String,String>>()
         val launched = java.util.concurrent.CopyOnWriteArrayList<Pair<Brand, Boolean>>()
+        fun avatar(color: Int, initial: String): ByteArray {
+            val bitmap = android.graphics.Bitmap.createBitmap(96, 96, android.graphics.Bitmap.Config.ARGB_8888)
+            bitmap.eraseColor(color)
+            val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                this.color = android.graphics.Color.WHITE
+                textSize = 46f
+                textAlign = android.graphics.Paint.Align.CENTER
+            }
+            android.graphics.Canvas(bitmap).drawText(initial, 48f, 64f, paint)
+            return ByteArrayOutputStream().apply { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, this) }.toByteArray()
+        }
+        val botColor = android.graphics.Color.rgb(69, 117, 112)
+        val userColor = android.graphics.Color.rgb(83, 113, 163)
+        val images = mapOf("/bot.png" to avatar(botColor, "李"), "/user.png" to avatar(userColor, "嘉"))
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val brand = active.get()
+                images[request.requestUrl!!.encodedPath]?.let {
+                    if (request.getHeader("Authorization") != null) return MockResponse().setResponseCode(403)
+                    return MockResponse().setHeader("Content-Type", "image/png").setBody(Buffer().write(it))
+                }
                 fun approval(issuer: Brand) = json("device_code" to "dev", "user_code" to "ABCD", "interval" to 1,
                     "verification_uri_complete" to "https://open.${issuer.domain}/page/launcher")
                 val step = when (request.requestUrl!!.encodedPath) {
@@ -76,6 +99,11 @@ class PlatformChatTest {
                     "/oauth/v1/device_authorization" -> approval(brand).put("verification_uri_complete", "https://accounts.${brand.domain}/activate?user_code=ABCD")
                     "/oauth/v3/token" -> if ((brand to false) in launched) json("access_token" to brand.name, "refresh_token" to "test-refresh")
                         else json("error" to "authorization_pending")
+                    "/open-apis/auth/v3/tenant_access_token/internal" -> json("code" to 0, "tenant_access_token" to "tat")
+                    "/open-apis/bot/v3/info" -> json("code" to 0, "bot" to json("open_id" to "ou_agent", "app_name" to "李老师",
+                        "avatar_url" to if (brand == Brand.LARK) server.url("/bot.png").toString() else ""))
+                    "/open-apis/authen/v1/user_info" -> if (brand == Brand.FEISHU) json("code" to 99991672, "msg" to "unavailable")
+                        else json("code" to 0, "data" to json("name" to "嘉嘉", "avatar_thumb" to server.url("/user.png").toString()))
                     else -> null
                 }
                 if (step != null) return MockResponse().setBody(step.toString())
@@ -84,16 +112,26 @@ class PlatformChatTest {
                 val url = request.requestUrl!!
                 return when {
                     url.encodedPath.endsWith("/chats") -> success(json("items" to JSONArray()
-                        .put(json("name" to "智能体$token", "chat_id" to peerId, "chat_mode" to "p2p"))
+                        .put(json("name" to "Admin Assistant", "chat_id" to "oc_admin", "chat_mode" to "p2p",
+                            "p2p_target_type" to "bot", "p2p_target_id" to "ou_admin"))
+                        .put(json("name" to "李老师", "chat_id" to "oc_contact", "chat_mode" to "p2p",
+                            "p2p_target_type" to "user", "p2p_target_id" to "ou_contact"))
+                        .put(json("name" to "李老师", "chat_id" to peerId, "chat_mode" to "p2p",
+                            "p2p_target_type" to "bot", "p2p_target_id" to "ou_agent"))
                         .put(json("name" to "群聊", "chat_id" to "oc_group", "chat_mode" to "group"))))
                     request.method == "POST" -> {
                         val body = JSONObject(request.body.readUtf8())
                         sent.add(token to body.getString("receive_id"))
                         success(JSONObject())
                     }
-                    url.queryParameter("container_id") == peerId -> success(json("items" to JSONArray()
-                        .put(json("message_id" to "om_1", "chat_id" to peerId, "msg_type" to "text",
-                            "body" to json("content" to json("text" to "回复$token").toString())))))
+                    url.queryParameter("container_id") == peerId -> {
+                        fun message(id: String, sender: String, text: String) = json("message_id" to id, "chat_id" to peerId,
+                            "msg_type" to "text", "sender" to json("sender_type" to sender),
+                            "body" to json("content" to json("text" to text).toString()))
+                        success(json("items" to JSONArray()
+                            .put(message("om_2", "app", "可以，我们先从第一道题开始。"))
+                            .put(message("om_1", "user", "李老师，今天的作业可以一起看看吗？"))))
+                    }
                     else -> MockResponse().setResponseCode(404)
                 }
             }
@@ -109,22 +147,109 @@ class PlatformChatTest {
         for (brand in Brand.entries) {
             active.set(brand)
             ui.onNodeWithText("使用${brand.title}登录").performClick()
-            waitText("请确认授权小李读取单聊，并以你的身份向选中的会话发消息。")
+            waitText("请确认授权小李读取你与这个智能体的单聊，并以你的身份发消息。")
             ui.onNodeWithText("打开${brand.title}确认").performClick()
-            waitText("智能体${brand.name}")
-            ui.onNodeWithText("群聊").assertDoesNotExist()
-            ui.onNodeWithText("智能体${brand.name}").performClick()
-            waitText("回复${brand.name}")
-            ui.onNode(hasSetTextAction()).performTextInput("test")
-            ui.onNodeWithText("发送").performClick()
+            waitText("可以，我们先从第一道题开始。")
+            ui.onNodeWithText("李老师").assertExists()
+            ui.onNodeWithText("Admin Assistant").assertDoesNotExist()
+            ui.onNodeWithText("选择单聊").assertDoesNotExist()
+            val botAvatar = ui.onNodeWithContentDescription("李老师的头像")
+            val selfAvatar = ui.onNodeWithContentDescription("我的头像")
+            botAvatar.assertIsDisplayed()
+            selfAvatar.assertIsDisplayed()
+            assertTrue(botAvatar.getUnclippedBoundsInRoot().right < selfAvatar.getUnclippedBoundsInRoot().left)
+            if (brand == Brand.LARK) {
+                fun shown(node: SemanticsNodeInteraction, color: Int): Boolean {
+                    val pixels = node.captureToImage().toPixelMap()
+                    return pixels[pixels.width / 2, pixels.height / 6].toArgb() == color
+                }
+                ui.waitUntil(10_000) { shown(botAvatar, botColor) && shown(selfAvatar, userColor) }
+                if (InstrumentationRegistry.getArguments().getString("captureChat") == "true") {
+                    val screen = ui.onRoot().captureToImage().asAndroidBitmap()
+                    File(app.cacheDir, "chat-preview.png").outputStream().use { screen.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                }
+            }
+            ui.onNodeWithContentDescription("发送").assertIsNotEnabled()
+            ui.onNodeWithContentDescription("展开输入框").performClick()
+            ui.onNodeWithContentDescription("收起输入框").performClick()
+            ui.onNodeWithContentDescription("更多附件").performClick()
+            ui.onNodeWithText("文件或文档").assertIsDisplayed()
+            ui.onNodeWithText("当前位置").assertIsDisplayed()
+            instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+            ui.onNode(hasSetTextAction()).performClick().performTextInput("test")
+            ui.onNodeWithContentDescription("表情").performClick()
+            ui.onNodeWithText("👍").performClick()
+            ui.runOnIdle { assertEquals("test👍", model.draft) }
+            ui.onNodeWithContentDescription("发送").assertIsDisplayed().performClick()
             ui.waitUntil(10000) { sent.contains(brand.name to "oc_${brand.name}") && !model.sending }
-            ui.onNodeWithText("切换会话").performClick()
-            waitText("智能体${brand.name}")
+            ui.onNodeWithContentDescription("更多").performClick()
             ui.onNodeWithText("切换平台").performClick()
         }
         ui.runOnIdle { model.home() }
         assertEquals(2, sent.size)
         assertEquals(Brand.entries.flatMap { listOf(it to true, it to false) }, launched.toList())
+        imageLoader.shutdown()
+        coil.Coil.reset()
+    }
+
+    @Test fun upgradeKeepsLoginAndReplacesLegacyManualChatOnlyAfterMatchingTheBot() {
+        val brand = Brand.LARK
+        val store = ImStore(app)
+        val token = UserToken("existing-user", "refresh", System.currentTimeMillis() + 3_600_000)
+        val keys = AppKeys("cli_agent", "test-secret")
+        // Seed the encrypted record in the format shipped in 0.0.13.
+        store.write(brand, LoginState(keys, token))
+        val legacy = json("app" to json("id" to keys.id, "secret" to keys.secret),
+            "user" to json("access" to token.access, "refresh" to token.refresh, "until" to token.until),
+            "chat" to json("name" to "李老师", "id" to "oc_wrong"))
+        val keyStore = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(javax.crypto.Cipher.ENCRYPT_MODE, keyStore.getKey("xiaoli-open-platform", null))
+        }
+        val record = android.util.Base64.encodeToString(cipher.iv + cipher.doFinal(legacy.toString().toByteArray()), android.util.Base64.NO_WRAP)
+        app.getSharedPreferences("open-platform", Context.MODE_PRIVATE).edit().putString(brand.name, record).commit()
+        store.active = brand
+        val history = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val ready = java.util.concurrent.atomic.AtomicBoolean(false)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val url = request.requestUrl!!
+                return when (url.encodedPath) {
+                    "/open-apis/auth/v3/tenant_access_token/internal" -> MockResponse().setBody("""{"code":0,"tenant_access_token":"tat"}""")
+                    "/open-apis/bot/v3/info" -> MockResponse().setBody("""{"code":0,"bot":{"open_id":"ou_agent","app_name":"李老师"}}""")
+                    "/open-apis/im/v1/chats" -> {
+                        val rows = JSONArray().put(json("chat_id" to "oc_wrong", "chat_mode" to "p2p", "name" to "李老师",
+                            "p2p_target_type" to "bot", "p2p_target_id" to "ou_someone_else"))
+                        if (ready.get()) rows.put(json("chat_id" to "oc_right", "chat_mode" to "p2p", "name" to "李老师",
+                            "p2p_target_type" to "bot", "p2p_target_id" to "ou_agent"))
+                        success(json("items" to rows))
+                    }
+                    "/open-apis/im/v1/messages" -> {
+                        history.add(url.queryParameter("container_id").orEmpty())
+                        success(json("items" to JSONArray()))
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val model = ui.runOnUiThread { ChatModel(app, ::api) }
+        ui.setContent { ChatScreen(model, listOf(brand), onCheckUpdate = {}) }
+        waitText("重新连接")
+        ui.onNodeWithContentDescription("发送").assertDoesNotExist()
+        assertNull(store.read(brand).peer)
+        assertEquals(token, store.read(brand).token)
+        assertTrue(history.isEmpty())
+        ready.set(true)
+        ui.onNodeWithText("重新连接").performClick()
+        waitText("李老师")
+        ui.waitUntil(10_000) { history.isNotEmpty() }
+        assertEquals(setOf("oc_right"), history.toSet())
+        val restored = ui.runOnUiThread { ChatModel(app, ::api) }
+        ui.runOnIdle {
+            assertEquals(Peer("oc_right", "李老师"), restored.selected)
+            restored.home()
+            model.home()
+        }
     }
 
     @Test fun loginOnlyOffersInstalledClients() {

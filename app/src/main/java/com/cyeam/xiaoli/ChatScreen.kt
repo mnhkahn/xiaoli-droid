@@ -5,18 +5,26 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
@@ -73,26 +81,54 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
             openCurrentApproval()
         }
     }
-    var confirmLogout by remember { mutableStateOf(false) }
-    BackHandler(enabled = brand != null) {
-        if (!model.sending) { if (peer != null) model.select(null) else model.home() }
+    var confirmLogout by remember(brand) { mutableStateOf(false) }
+    BackHandler(enabled = brand != null && (!model.signedIn || model.sending)) {
+        if (!model.sending) model.home()
     }
-    Surface(modifier = Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(peer?.name ?: if (model.signedIn) "选择单聊" else "小李", style = MaterialTheme.typography.headlineMedium,
-                    modifier = Modifier.weight(1f), maxLines = 2)
-                if (brand != null && (peer != null || clients.any { it != brand })) {
-                    TextButton(onClick = { if (peer != null) model.select(null) else model.home() },
-                        enabled = !model.sending) { Text(if (peer != null) "切换会话" else "切换平台") }
+    val back = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
+    Surface(modifier = Modifier.fillMaxSize(),
+        color = if (peer == null) MaterialTheme.colorScheme.surface else chatColor(0xffffffff, 0xff191b20)) {
+        Column(Modifier.fillMaxSize().safeDrawingPadding().imePadding().padding(horizontal = if (peer == null) 20.dp else 0.dp),
+            verticalArrangement = Arrangement.spacedBy(if (peer == null) 8.dp else 0.dp)) {
+            if (peer == null) Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (peer == null) {
+                    Text(if (model.signedIn) "连接智能体" else "小李", style = MaterialTheme.typography.headlineMedium,
+                        modifier = Modifier.weight(1f), maxLines = 2)
+                } else {
+                    IconButton(onClick = { back?.onBackPressed() }, enabled = !model.sending) {
+                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, "返回")
+                    }
+                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                        Text(peer.name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.width(6.dp))
+                        Surface(shape = RoundedCornerShape(5.dp), color = chatColor(0xffeee7ff, 0xff433256)) {
+                            Text("智能体", Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                color = chatColor(0xff7446bb, 0xffdec3ff), style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+                if (brand != null && model.signedIn) {
+                    var expanded by remember { mutableStateOf(false) }
+                    Box {
+                        IconButton(onClick = { expanded = true }, enabled = !model.sending) { Icon(Icons.Outlined.MoreHoriz, "更多") }
+                        DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
+                            DropdownMenuItem(text = { Text("检查更新") }, onClick = { expanded = false; onCheckUpdate() })
+                            if (clients.any { it != brand }) DropdownMenuItem(text = { Text("切换平台") },
+                                onClick = { expanded = false; model.home() })
+                            DropdownMenuItem(text = { Text("断开连接") }, onClick = { expanded = false; confirmLogout = true })
+                        }
+                    }
+                } else if (brand != null && clients.any { it != brand }) {
+                    TextButton(onClick = model::home) { Text("切换平台") }
                 }
             }
-            model.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            if (peer != null) HorizontalDivider(color = chatColor(0xffeceef1, 0xff373a41))
+            model.error?.let { Text(it, Modifier.padding(horizontal = if (peer == null) 0.dp else 12.dp), color = MaterialTheme.colorScheme.error) }
             launchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (brand == null) {
-                Text(if (clients.isEmpty()) "请先安装或启用 Lark 或飞书，再返回小李登录。" else "登录后，在小李选择你和智能体已有的单聊。")
+                Text(if (clients.isEmpty()) "请先安装或启用 Lark 或飞书，再返回小李登录。" else "在开放平台选中你的智能体应用，登录后直接进入和它的单聊。")
                 for (entry in clients) Button(onClick = { openOnReady = true; model.enter(entry) }, modifier = Modifier.fillMaxWidth()) {
                     Text("使用${entry.title}登录")
                 }
@@ -100,8 +136,8 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
                 Text("${brand.title}登录", style = MaterialTheme.typography.titleLarge)
                 val approval = model.approval
                 if (approval != null) {
-                    Text(if (approval.registration) "先在开放平台选择你管理的应用，或新建一个用于授权。确认所需权限后，回到小李授权账号，再选择已有单聊。"
-                        else "请确认授权小李读取单聊，并以你的身份向选中的会话发消息。")
+                    Text(if (approval.registration) "在开放平台选择你想聊天的智能体应用。确认后，回到小李授权账号。"
+                        else "请确认授权小李读取你与这个智能体的单聊，并以你的身份发消息。")
                     if (approval.code.isNotEmpty()) SelectionContainer { Text("确认码  ${approval.code}") }
                     Button(onClick = ::openCurrentApproval) { Text("打开${brand.title}确认") }
                     TextButton(onClick = { openOnReady = true; model.renewLoginLink() }) { Text("获取新链接") }
@@ -112,34 +148,23 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
                     if (model.error != null) TextButton(onClick = { confirmLogout = true }) { Text("重置本机连接") }
                 }
             } else if (peer == null) {
-                Text("${brand.title} · 选择已有的智能体单聊")
-                Row {
-                    TextButton(onClick = model::listPeers, enabled = !model.busy) { Text("刷新列表") }
-                    TextButton(onClick = { confirmLogout = true }) { Text("退出账号") }
-                }
-                if (model.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                else if (model.peers.isEmpty() && model.error == null) Text("没有可见的单聊。先在${brand.title}和智能体发一条消息，再刷新。")
-                var query by rememberSaveable(brand) { mutableStateOf("") }
-                if (model.peers.size > 1) OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(),
-                    singleLine = true, label = { Text("搜索会话名称") })
-                LazyColumn(Modifier.weight(1f)) {
-                    items(model.peers.filter { it.name.contains(query.trim(), ignoreCase = true) }, key = { it.id }) { chat ->
-                        OutlinedButton(onClick = { model.select(chat) }, modifier = Modifier.fillMaxWidth()) { Text(chat.name) }
-                    }
-                }
-            } else key(brand, peer.id) { Conversation(model) }
-            if (peer == null) TextButton(onClick = onCheckUpdate) { Text("检查更新") }
+                if (model.busy) {
+                    Text("正在${brand.title}查找你与所选智能体的单聊…")
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                } else Button(onClick = model::connect) { Text("重新连接") }
+            } else key(brand, peer.id) { Conversation(model, peer.name) }
+            if (!model.signedIn) TextButton(onClick = onCheckUpdate) { Text("检查更新") }
         }
     }
     if (confirmLogout) AlertDialog(onDismissRequest = { confirmLogout = false },
-        title = { Text(if (model.signedIn) "退出${brand?.title}账号？" else "重置本机连接？") },
-        text = { Text(if (model.signedIn) "下次登录需要重新授权和选择会话。" else "下次登录需要重新选择或创建授权应用。") },
-        confirmButton = { TextButton(onClick = { confirmLogout = false; model.logout(resetApp = !model.signedIn) }) { Text("确认") } },
+        title = { Text(if (model.signedIn) "断开与智能体的连接？" else "重置本机连接？") },
+        text = { Text("下次连接需要重新选择智能体应用并授权账号。") },
+        confirmButton = { TextButton(onClick = { confirmLogout = false; model.disconnect() }) { Text("确认") } },
         dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("取消") } })
 }
 
 @Composable
-private fun ColumnScope.Conversation(model: ChatModel) {
+private fun ColumnScope.Conversation(model: ChatModel, peerName: String) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(model, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -157,34 +182,28 @@ private fun ColumnScope.Conversation(model: ChatModel) {
     }
     model.historyError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     val context = LocalContext.current
-    LazyColumn(Modifier.weight(1f).fillMaxWidth(), reverseLayout = true, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    LazyColumn(Modifier.weight(1f).fillMaxWidth(), reverseLayout = true,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(model.messages, key = { it.id }) { msg ->
-            Surface(shape = MaterialTheme.shapes.medium, color = if (msg.bot) MaterialTheme.colorScheme.secondaryContainer
-                else MaterialTheme.colorScheme.surfaceContainer) {
-                Column(Modifier.padding(10.dp)) {
-                    SelectionContainer { Text(msg.text) }
-                    val link = android.util.Patterns.WEB_URL.matcher(msg.text).let { if (it.find()) it.group() else null }
-                    if (link != null && link.startsWith("https://")) TextButton(onClick = {
-                        try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
-                        catch (_: ActivityNotFoundException) { model.notice("没有可用的浏览器") }
-                    }) { Text("打开链接") }
-                    msg.resource?.let { resource ->
-                        if (msg.type in setOf("image", "audio"))
-                            TextButton(onClick = { model.preview(msg) { preview = it to msg.type } }, enabled = !model.busy) {
-                                Text(if (msg.type == "image") "查看图片" else "播放语音")
-                            }
-                        TextButton(onClick = { savingId = msg.id; save.launch(resource.name.substringAfterLast('/').substringAfterLast('\\')) },
-                            enabled = !model.busy) { Text("保存附件") }
-                    }
+            MessageBubble(msg.sender, if (msg.sender == Sender.USER) model.userProfile else model.botProfile,
+                peerName) {
+                SelectionContainer { Text(msg.text) }
+                val link = android.util.Patterns.WEB_URL.matcher(msg.text).let { if (it.find()) it.group() else null }
+                if (link != null && link.startsWith("https://")) TextButton(onClick = {
+                    try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
+                    catch (_: ActivityNotFoundException) { model.notice("没有可用的浏览器") }
+                }) { Text("打开链接") }
+                msg.resource?.let { resource ->
+                    if (msg.type in setOf("image", "audio"))
+                        TextButton(onClick = { model.preview(msg) { preview = it to msg.type } }, enabled = !model.busy) {
+                            Text(if (msg.type == "image") "查看图片" else "播放语音")
+                        }
+                    TextButton(onClick = { savingId = msg.id; save.launch(resource.name.substringAfterLast('/').substringAfterLast('\\')) },
+                        enabled = !model.busy) { Text("保存附件") }
                 }
             }
         }
         if (model.older != null) item { TextButton(onClick = model::loadOlder, enabled = !model.busy) { Text("查看更早的消息") } }
     }
-    AttachmentActions(model)
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(model.draft, model::edit, Modifier.weight(1f), placeholder = { Text("消息") }, maxLines = 4)
-        Button(onClick = model::sendText, enabled = !model.sending && model.draft.isNotBlank()) { Text("发送") }
-    }
-    Spacer(Modifier.height(4.dp))
+    MessageComposer(model, peerName)
 }

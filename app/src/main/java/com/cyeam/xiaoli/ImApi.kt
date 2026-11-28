@@ -5,6 +5,7 @@ import java.io.OutputStream
 import okhttp3.FormBody
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
@@ -27,8 +28,11 @@ internal enum class Brand(val title: String, val domain: String, val appScheme: 
 }
 
 internal data class Peer(val id: String, val name: String)
+internal data class Profile(val name: String, val avatar: String?)
+internal data class AppBot(val appId: String, val openId: String, val name: String, val avatar: String? = null)
 internal data class Resource(val key: String, val type: String, val name: String)
-internal data class ImMessage(val id: String, val text: String, val resource: Resource?, val bot: Boolean, val type: String)
+internal enum class Sender { USER, BOT, OTHER }
+internal data class ImMessage(val id: String, val text: String, val resource: Resource?, val sender: Sender, val type: String)
 internal data class Messages(val items: List<ImMessage>, val next: String?)
 internal class ImFailure(val code: Int, reason: String) : IOException("开放平台 $code · $reason")
 
@@ -43,6 +47,11 @@ private fun JSONObject.rows(): List<JSONObject> {
 
 private fun JSONObject.nextToken(): String? =
     optString("page_token").takeIf { optBoolean("has_more") && it.isNotBlank() }
+
+private fun JSONObject.avatarUrl(vararg fields: String): String? =
+    fields.firstNotNullOfOrNull { field ->
+        optString(field).toHttpUrlOrNull()?.takeIf { it.isHttps && it.username.isEmpty() && it.password.isEmpty() }?.toString()
+    }
 
 private fun readableParts(value: Any?, parts: MutableList<String>) {
     when (value) {
@@ -80,8 +89,12 @@ internal fun decodeMessage(item: JSONObject): ImMessage {
         resource != null -> resource.name
         else -> buildList { readableParts(body, this) }.distinct().joinToString("\n").ifBlank { "[$type 消息]" }
     }
-    return ImMessage(item.getString("message_id"), message, resource.takeUnless { item.optBoolean("deleted") },
-        item.optJSONObject("sender")?.optString("sender_type") in setOf("app", "bot"), type)
+    val sender = when (item.optJSONObject("sender")?.optString("sender_type")) {
+        "user" -> Sender.USER
+        "app", "bot" -> Sender.BOT
+        else -> Sender.OTHER
+    }
+    return ImMessage(item.getString("message_id"), message, resource.takeUnless { item.optBoolean("deleted") }, sender, type)
 }
 
 internal class ImApi(
@@ -118,29 +131,58 @@ internal class ImApi(
         return Request.Builder().url(url).header("Authorization", "Bearer $token").apply { body?.let(::post) }.build()
     }
 
-    private fun data(request: Request): JSONObject = http.newCall(request).execute().use { response ->
+    private fun response(request: Request): JSONObject = http.newCall(request).execute().use { response ->
         val result = runCatching { JSONObject(response.body?.string().orEmpty()) }
             .getOrElse { throw IOException("开放平台返回 HTTP ${response.code}") }
         val code = result.optInt("code", -1)
         if (!response.isSuccessful || code != 0) throw ImFailure(code, result.optString("msg", "请求失败").take(220))
-        result.getJSONObject("data")
+        result
     }
 
-    fun peers(token: String): List<Peer> {
-        val result = mutableListOf<Peer>()
+    private fun data(request: Request) = response(request).getJSONObject("data")
+
+    fun appBot(keys: AppKeys): AppBot {
+        val credentials = json("app_id" to keys.id, "app_secret" to keys.secret)
+        val grant = Request.Builder().url(open.newBuilder().encodedPath("/open-apis/auth/v3/tenant_access_token/internal").build())
+            .post(credentials.toString().toRequestBody("application/json".toMediaType())).build()
+        val tenantToken = response(grant).getString("tenant_access_token")
+        val info = Request.Builder().url(open.newBuilder().encodedPath("/open-apis/bot/v3/info").build())
+            .header("Authorization", "Bearer $tenantToken").build()
+        val bot = response(info).getJSONObject("bot")
+        val openId = bot.optString("open_id")
+        if (!openId.startsWith("ou_") || openId.length <= 3) throw IOException("无法确认所选应用的机器人身份，请检查应用是否已启用机器人。")
+        return AppBot(keys.id, openId, bot.optString("app_name").ifBlank { "智能体" }, bot.avatarUrl("avatar_url"))
+    }
+
+    fun userProfile(token: String): Profile {
+        val request = Request.Builder().url(open.newBuilder().encodedPath("/open-apis/authen/v1/user_info").build())
+            .header("Authorization", "Bearer $token").build()
+        val user = data(request)
+        return Profile(user.optString("name").ifBlank { "我" }, user.avatarUrl("avatar_middle", "avatar_thumb", "avatar_url"))
+    }
+
+    fun appChat(token: String, bot: AppBot): Peer {
+        var match: Peer? = null
         val cursors = mutableSetOf<String>()
         var cursor: String? = null
         do {
-            val params = mutableMapOf("types" to "p2p", "page_size" to "100")
+            val params = mutableMapOf("types" to "p2p", "user_id_type" to "open_id", "page_size" to "100")
             cursor?.let { params["page_token"] = it }
             val page = data(request(token, "chats", params))
-            result += page.rows().filter { it.optString("chat_mode") == "p2p" }.mapNotNull {
-                val id = it.optString("chat_id").takeIf { id -> id.startsWith("oc_") } ?: return@mapNotNull null
-                Peer(id, it.optString("name").ifBlank { id })
+            for (row in page.rows()) {
+                if (row.optString("chat_mode") != "p2p" || row.optString("p2p_target_type") != "bot") continue
+                val target = row.optString("p2p_target_id")
+                if (target != bot.openId && target != bot.appId) continue
+                val id = row.optString("chat_id")
+                if (!id.startsWith("oc_") || id.length <= 3) throw IOException("平台返回的单聊 ID 无效，请重试。")
+                if (match != null && match.id != id) throw IOException("平台返回了多个与「${bot.name}」匹配的单聊，暂时无法确认。")
+                match = Peer(id, row.optString("name").ifBlank { bot.name })
             }
             cursor = page.nextToken()
-        } while (cursor != null && cursors.add(cursor))
-        return result.distinctBy { it.id }
+            if (page.optBoolean("has_more") && (cursor == null || !cursors.add(cursor)))
+                throw IOException("单聊列表未加载完整，请重试。")
+        } while (cursor != null)
+        return match ?: throw IOException("找不到与「${bot.name}」的单聊。请在${brand.title}打开这个机器人的对话，发一条消息后重试。")
     }
 
     fun messages(token: String, peer: Peer, cursor: String? = null): Messages {

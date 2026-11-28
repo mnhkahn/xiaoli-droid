@@ -51,7 +51,9 @@ internal class ImStore(context: Context) {
         val data = JSONObject(String(cipher.doFinal(bytes.copyOfRange(12, bytes.size)), Charsets.UTF_8))
         val keys = data.optJSONObject("app")?.let { AppKeys(it.getString("id"), it.getString("secret")) }
         val token = data.optJSONObject("user")?.let { UserToken(it.getString("access"), it.getString("refresh"), it.getLong("until")) }
-        val peer = data.optJSONObject("chat")?.let { Peer(it.getString("id"), it.getString("name")) }
+        // Older builds stored an arbitrary manually selected recipient in "chat".
+        val peer = data.optJSONObject("appChat")?.takeIf { keys != null && it.optString("appId") == keys.id }
+            ?.let { Peer(it.getString("id"), it.getString("name")) }
         val pending = data.optJSONObject("pending")?.let { Approval(it.getString("url"), it.getString("code"),
             it.getBoolean("registration"), it.getString("device"), it.getLong("until"), it.getLong("interval"),
             Brand.entries.find { brand -> brand.name == it.optString("registrationPollBrand") }) }
@@ -66,7 +68,7 @@ internal class ImStore(context: Context) {
         val data = JSONObject()
         state.keys?.let { data.put("app", json("id" to it.id, "secret" to it.secret)) }
         state.token?.let { data.put("user", json("access" to it.access, "refresh" to it.refresh, "until" to it.until)) }
-        state.peer?.let { data.put("chat", json("id" to it.id, "name" to it.name)) }
+        state.peer?.let { data.put("appChat", json("appId" to requireNotNull(state.keys).id, "id" to it.id, "name" to it.name)) }
         state.pending?.let { ticket ->
             val pending = json("url" to ticket.url, "code" to ticket.code, "registration" to ticket.registration,
                 "device" to ticket.device, "until" to ticket.until, "interval" to ticket.interval)

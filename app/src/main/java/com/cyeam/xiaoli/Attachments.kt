@@ -12,13 +12,21 @@ import android.os.SystemClock
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -117,10 +125,12 @@ internal class VoiceRecording(private val context: Context) {
 }
 
 @Composable
-internal fun AttachmentActions(model: ChatModel) {
+internal fun MessageComposer(model: ChatModel, peerName: String) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
+    var emoji by rememberSaveable { mutableStateOf(false) }
+    var expanded by rememberSaveable { mutableStateOf(false) }
     var pickingImage by rememberSaveable { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) runCatching {
@@ -154,38 +164,84 @@ internal fun AttachmentActions(model: ChatModel) {
     val gps = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
         if (permissions.values.any { it }) locate() else model.notice("需要定位权限才能分享位置")
     }
-    Row {
-        if (recording) {
-            TextButton(onClick = {
-                recording = false
-                runCatching {
-                    val (tmp, duration) = voice.finish()
-                    model.sendAttachment("语音.ogg", tmp.asRequestBody("audio/ogg".toMediaTypeOrNull()), "audio", duration) { tmp.delete() }
-                }.onFailure { model.notice("录音过短或麦克风不可用") }
-            }, enabled = !model.sending) { Text("结束并发送语音") }
-            TextButton(onClick = { voice.discard(); recording = false }) { Text("取消录音") }
-        } else {
-            TextButton(onClick = { menu = true }, enabled = !model.sending) { Text("添加附件") }
-            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                for ((label, image) in listOf("图片" to true, "文件或文档" to false)) {
-                    DropdownMenuItem(text = { Text(label) }, onClick = {
-                        menu = false
-                        pickingImage = image
-                        picker.launch(arrayOf(if (image) "image/*" else "*/*"))
-                    })
+    val toolColor = chatColor(0xff626976, 0xffb7bdc8)
+    val accent = chatColor(0xff3267df, 0xff91b6ff)
+    Column(Modifier.fillMaxWidth().background(chatColor(0xfff5f6f8, 0xff21242a))) {
+        HorizontalDivider(color = chatColor(0xffe9eaed, 0xff363941))
+        var editor by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(model.draft)) }
+        // Keep the IME selection while accepting location inserts and a successful send from the model.
+        val value = if (editor.text == model.draft) editor else TextFieldValue(model.draft, TextRange(model.draft.length))
+        SideEffect { if (editor != value) editor = value }
+        fun change(next: TextFieldValue) {
+            editor = next
+            if (model.draft != next.text) model.edit(next.text)
+        }
+        Surface(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 8.dp),
+            shape = RoundedCornerShape(14.dp), color = chatColor(0xffffffff, 0xff30333a)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                BasicTextField(value, ::change, Modifier.weight(1f).padding(start = 14.dp, top = 12.dp, bottom = 12.dp),
+                    minLines = if (expanded) 3 else 1, maxLines = if (expanded) 6 else 3,
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = SolidColor(accent),
+                    decorationBox = { inner -> Box {
+                        if (value.text.isEmpty()) Text("发送给 $peerName", color = toolColor, maxLines = 1)
+                        inner()
+                    } })
+                IconButton(onClick = { expanded = !expanded }) {
+                    Icon(if (expanded) Icons.Outlined.CloseFullscreen else Icons.Outlined.OpenInFull,
+                        if (expanded) "收起输入框" else "展开输入框", Modifier.size(19.dp), tint = toolColor)
                 }
-                DropdownMenuItem(text = { Text("录制语音") }, onClick = {
-                    menu = false
-                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) start()
-                    else mic.launch(Manifest.permission.RECORD_AUDIO)
-                })
-                DropdownMenuItem(text = { Text("当前位置") }, onClick = {
-                    menu = false
-                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) locate()
-                    else gps.launch(arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION))
-                })
             }
         }
-        if (model.sending) { Spacer(Modifier.width(8.dp)); Text("正在发送…") }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (recording) {
+                TextButton(onClick = {
+                    recording = false
+                    runCatching {
+                        val (tmp, duration) = voice.finish()
+                        model.sendAttachment("语音.ogg", tmp.asRequestBody("audio/ogg".toMediaTypeOrNull()), "audio", duration) { tmp.delete() }
+                    }.onFailure { model.notice("录音过短或麦克风不可用") }
+                }, enabled = !model.sending) { Text("结束并发送语音") }
+                TextButton(onClick = { voice.discard(); recording = false }) { Text("取消录音") }
+            } else {
+                IconButton(onClick = { emoji = !emoji }) {
+                    Icon(Icons.Outlined.SentimentSatisfiedAlt, "表情", tint = if (emoji) accent else toolColor)
+                }
+                IconButton(onClick = {
+                    emoji = false
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) start()
+                    else mic.launch(Manifest.permission.RECORD_AUDIO)
+                }, enabled = !model.sending) { Icon(Icons.Outlined.MicNone, "录制语音") }
+                IconButton(onClick = { emoji = false; pickingImage = true; picker.launch(arrayOf("image/*")) },
+                    enabled = !model.sending) { Icon(Icons.Outlined.Image, "选择图片") }
+                Box {
+                    IconButton(onClick = { emoji = false; menu = true }, enabled = !model.sending) { Icon(Icons.Outlined.AddCircleOutline, "更多附件") }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("文件或文档") }, leadingIcon = { Icon(Icons.Outlined.AttachFile, null) },
+                            onClick = { menu = false; pickingImage = false; picker.launch(arrayOf("*/*")) })
+                        DropdownMenuItem(text = { Text("当前位置") }, leadingIcon = { Icon(Icons.Outlined.LocationOn, null) }, onClick = {
+                            menu = false
+                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) locate()
+                            else gps.launch(arrayOf(Manifest.permission.ACCESS_COARSE_LOCATION, Manifest.permission.ACCESS_FINE_LOCATION))
+                        })
+                    }
+                }
+                Spacer(Modifier.weight(1f))
+                if (model.sending) CircularProgressIndicator(Modifier.padding(12.dp).size(24.dp), strokeWidth = 2.dp)
+                else IconButton(onClick = { emoji = false; model.sendText() }, enabled = model.draft.isNotBlank(),
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = accent)) {
+                    Icon(Icons.AutoMirrored.Filled.Send, "发送")
+                }
+            }
+        }
+        if (emoji && !recording) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+            for (symbol in listOf("😀", "👍", "❤️", "🎉", "🙏", "👏")) {
+                IconButton(onClick = {
+                    val start = value.selection.min
+                    val text = value.text.replaceRange(start, value.selection.max, symbol)
+                    change(TextFieldValue(text, TextRange(start + symbol.length)))
+                }) { Text(symbol, style = MaterialTheme.typography.titleLarge) }
+            }
+        }
     }
 }
