@@ -43,7 +43,8 @@ internal class ImLogin(private val api: ImApi) {
             if (url.host == "open.${issuer.domain}" && url.encodedPath == "/page/launcher") {
                 link.host("open.${api.brand.domain}")
             }
-            val addons = json("preset" to false, "scopes" to json("user" to JSONArray(userScopes)))
+            val addons = json("preset" to false, "scopes" to json("user" to JSONArray(userScopes),
+                "tenant" to JSONArray().put("application:application:self_manage")))
             val bytes = ByteArrayOutputStream()
             GZIPOutputStream(bytes).use { it.write(addons.toString().toByteArray()) }
             link.setQueryParameter("from", "sdk").setQueryParameter("tp", "sdk")

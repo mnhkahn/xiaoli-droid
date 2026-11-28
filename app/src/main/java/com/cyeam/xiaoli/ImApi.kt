@@ -141,17 +141,36 @@ internal class ImApi(
 
     private fun data(request: Request) = response(request).getJSONObject("data")
 
-    fun appBot(keys: AppKeys): AppBot {
+    private fun tenantToken(keys: AppKeys): String {
         val credentials = json("app_id" to keys.id, "app_secret" to keys.secret)
         val grant = Request.Builder().url(open.newBuilder().encodedPath("/open-apis/auth/v3/tenant_access_token/internal").build())
             .post(credentials.toString().toRequestBody("application/json".toMediaType())).build()
-        val tenantToken = response(grant).getString("tenant_access_token")
+        return response(grant).getString("tenant_access_token")
+    }
+
+    fun appBot(keys: AppKeys): AppBot {
         val info = Request.Builder().url(open.newBuilder().encodedPath("/open-apis/bot/v3/info").build())
-            .header("Authorization", "Bearer $tenantToken").build()
+            .header("Authorization", "Bearer ${tenantToken(keys)}").build()
         val bot = response(info).getJSONObject("bot")
         val openId = bot.optString("open_id")
         if (!openId.startsWith("ou_") || openId.length <= 3) throw IOException("无法确认所选应用的机器人身份，请检查应用是否已启用机器人。")
         return AppBot(keys.id, openId, bot.optString("app_name").ifBlank { "智能体" }, bot.avatarUrl("avatar_url"))
+    }
+
+    fun commandMenu(keys: AppKeys): List<BotMenuItem> {
+        val token = tenantToken(keys)
+        val app = open.newBuilder().addPathSegments("open-apis/application/v6/applications")
+            .addPathSegment(keys.id).addQueryParameter("lang", "zh_cn").build()
+        fun get(url: HttpUrl) = data(Request.Builder().url(url).header("Authorization", "Bearer $token").build())
+        val info = get(app).getJSONObject("app")
+        if (info.isNull("online_version_id")) return emptyList()
+        val versionId = info.getString("online_version_id")
+        if (versionId.isBlank()) return emptyList()
+        val version = get(app.newBuilder().addPathSegment("app_versions").addPathSegment(versionId).build())
+            .getJSONObject("app_version")
+        if (version.getString("app_id") != keys.id || version.getString("version_id") != versionId)
+            throw IOException("快捷菜单与当前应用版本不匹配")
+        return decodeBotMenu(version.optJSONObject("ability")?.optJSONObject("bot"))
     }
 
     fun userProfile(token: String): Profile {

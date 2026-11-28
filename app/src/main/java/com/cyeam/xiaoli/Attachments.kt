@@ -166,6 +166,10 @@ internal fun MessageComposer(model: ChatModel, peerName: String) {
     }
     val toolColor = chatColor(0xff626976, 0xffb7bdc8)
     val accent = chatColor(0xff3267df, 0xff91b6ff)
+    model.menuError?.let { message ->
+        TextButton(onClick = model::refreshMenu) { Text("$message · 重试") }
+    }
+    CommandBar(model.menu, enabled = !model.sending && !recording, send = model::sendCommand)
     Column(Modifier.fillMaxWidth().background(chatColor(0xfff5f6f8, 0xff21242a))) {
         HorizontalDivider(color = chatColor(0xffe9eaed, 0xff363941))
         var editor by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(model.draft)) }

@@ -114,6 +114,8 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
                     Box {
                         IconButton(onClick = { expanded = true }, enabled = !model.sending) { Icon(Icons.Outlined.MoreHoriz, "更多") }
                         DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
+                            if (peer != null) DropdownMenuItem(text = { Text("刷新快捷菜单") },
+                                onClick = { expanded = false; model.refreshMenu() })
                             DropdownMenuItem(text = { Text("检查更新") }, onClick = { expanded = false; onCheckUpdate() })
                             if (clients.any { it != brand }) DropdownMenuItem(text = { Text("切换平台") },
                                 onClick = { expanded = false; model.home() })
@@ -168,6 +170,7 @@ private fun ColumnScope.Conversation(model: ChatModel, peerName: String) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(model, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            model.refreshMenu()
             val poll = model.startPolling()
             try { awaitCancellation() } finally { poll.cancel() }
         }

@@ -39,6 +39,9 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
     var selected by mutableStateOf<Peer?>(null); private set
     var userProfile by mutableStateOf<Profile?>(null); private set
     var botProfile by mutableStateOf<Profile?>(null); private set
+    var menu by mutableStateOf(emptyList<BotMenuItem>()); private set
+    var menuError by mutableStateOf<String?>(null); private set
+    private var menuJob: Job? = null
     var messages by mutableStateOf(emptyList<ImMessage>()); private set
     var older by mutableStateOf<String?>(null); private set
     var error by mutableStateOf<String?>(null); private set
@@ -58,6 +61,9 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         historyError = null
         userProfile = null
         botProfile = null
+        menu = emptyList()
+        menuError = null
+        menuJob = null
         messages = emptyList()
         older = null
         edit("")
@@ -233,6 +239,25 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         historyError = null
     }
 
+    fun refreshMenu() {
+        val keys = account.keys ?: return
+        val peer = selected ?: return
+        if (menuJob?.isActive == true) return
+        val client = api
+        menuJob = session.launch {
+            try {
+                val items = withContext(Dispatchers.IO) { client.commandMenu(keys) }
+                if (selected == peer) { menu = items; menuError = null }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                if (selected == peer) {
+                    menu = emptyList()
+                    menuError = if (e is ImFailure && e.code == 99991672) "应用缺少读取快捷菜单的权限" else "快捷菜单加载失败"
+                }
+            }
+        }
+    }
+
     fun startPolling(): Job {
         val peer = requireNotNull(selected)
         return session.launch {
@@ -272,9 +297,18 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         val text = draft.trim()
         if (text.isEmpty()) return
         val id = draftId
+        sendText(text, id) { if (draftId == id) edit("") }
+    }
+
+    fun sendCommand(command: BotMenuItem.Command) {
+        if (menu.none { it == command || (it is BotMenuItem.Group && command in it.commands) }) return
+        sendText(command.label, UUID.randomUUID().toString())
+    }
+
+    private fun sendText(text: String, id: String, onSent: () -> Unit = {}) {
         send { peer ->
             withToken { client, access -> client.send(access, peer, "text", json("text" to text), id) }
-            if (draftId == id) edit("")
+            onSent()
         }
     }
 

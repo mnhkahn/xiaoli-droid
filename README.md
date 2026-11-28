@@ -17,6 +17,8 @@ Android 10 及以上的飞书和 Lark 单聊客户端。应用 ID 为 `com.cyeam
 
 - 聊天页左侧显示智能体消息和头像，右侧显示自己的消息和头像。头像来自开放平台，暂时无法加载时显示名字首字。[用户资料字段](https://open.larksuite.com/document/uAjLw4CM/ukTMukTMukTM/reference/authen-v1/user_info/get) · [智能体头像字段](https://open.larksuite.com/document/client-docs/bot-v3/obtain-bot-info)
 - 底部输入框支持展开和多行编辑。工具栏可插入表情、录音、选图和发送；点加号可选文件、文档和位置。
+- 输入框上方的快捷命令取自当前飞书或 Lark 应用已发布版本的机器人菜单。点开分组后，点命令会以当前账号直接发给已连接的智能体，并保留草稿。重新打开会话会刷新，也可在「更多 → 刷新快捷菜单」手动更新。
+- 读取菜单使用应用身份权限 `application:application:self_manage`。未启用菜单时按钮行自动隐藏。这里仅展示发送文字的菜单项及其分组，菜单读取失败时仍可正常聊天。[应用线上版本](https://open.larksuite.com/document/server-docs/application-v6/application/get-2.md) · [机器人菜单字段](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/application-v6/application-app_version/get.md)
 - 图片、普通文件及本地文档从 Android 文件选择器选择。收到的图片可预览，附件可保存到系统文件选择器指定的位置。云文档可作为链接分享，打开时沿用文档自身的访问权限。
 - 录音使用 Ogg Opus，通过平台语音消息发送并在小李内播放。已有的 WAV、MP3 等也可以作为文件发送。
 - 位置通过「加号 → 当前位置」插入坐标和地图链接到草稿，点「发送」后才发出。收到的位置消息也可以打开地图链接。发出的是文本和链接。

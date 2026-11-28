@@ -100,6 +100,7 @@ class PlatformChatTest {
                     "/oauth/v3/token" -> if ((brand to false) in launched) json("access_token" to brand.name, "refresh_token" to "test-refresh")
                         else json("error" to "authorization_pending")
                     "/open-apis/auth/v3/tenant_access_token/internal" -> json("code" to 0, "tenant_access_token" to "tat")
+                    "/open-apis/application/v6/applications/id" -> json("code" to 0, "data" to json("app" to json("online_version_id" to "")))
                     "/open-apis/bot/v3/info" -> json("code" to 0, "bot" to json("open_id" to "ou_agent", "app_name" to "李老师",
                         "avatar_url" to if (brand == Brand.LARK) server.url("/bot.png").toString() else ""))
                     "/open-apis/authen/v1/user_info" -> if (brand == Brand.FEISHU) json("code" to 99991672, "msg" to "unavailable")
@@ -190,6 +191,109 @@ class PlatformChatTest {
         assertEquals(Brand.entries.flatMap { listOf(it to true, it to false) }, launched.toList())
         imageLoader.shutdown()
         coil.Coil.reset()
+    }
+
+    @Test fun publishedMenuSendsOnlyToBoundChatAndRefreshesWithoutChangingDraft() {
+        val store = ImStore(app)
+        val generation = java.util.concurrent.atomic.AtomicInteger(0)
+        val sent = java.util.concurrent.CopyOnWriteArrayList<Triple<String, String, String>>()
+        val args = InstrumentationRegistry.getArguments()
+        // An optional sanitized platform menu exercises the same UI against a real configuration.
+        val fixture = args.getString("menuFixture")?.let {
+            JSONArray(String(android.util.Base64.decode(it, android.util.Base64.DEFAULT), Charsets.UTF_8))
+        }
+        fun rows(brand: Brand): JSONArray {
+            if (fixture != null && brand == Brand.LARK) return fixture
+            return JSONArray().put(json("menu_id" to "g", "default_name" to "工具 ${brand.title}", "menu_content_type" to 3))
+                .put(json("menu_id" to "c", "parent_menu_id" to "g", "default_name" to "/lookup ${brand.name}", "menu_content_type" to 4))
+        }
+        for (brand in Brand.entries) store.write(brand, LoginState(AppKeys(brand.name, "secret"),
+            UserToken("user-${brand.name}", "refresh", System.currentTimeMillis() + 3_600_000), Peer("oc_${brand.name}", "李老师")))
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.requestUrl!!.encodedPath
+                val bearer = request.getHeader("Authorization").orEmpty().removePrefix("Bearer ")
+                fun raw(value: JSONObject) = MockResponse().setBody(value.toString())
+                if (path.endsWith("/tenant_access_token/internal")) {
+                    val appId = JSONObject(request.body.readUtf8()).getString("app_id")
+                    return raw(json("code" to 0, "tenant_access_token" to "app-$appId"))
+                }
+                if (path == "/open-apis/bot/v3/info") return raw(json("code" to 0, "bot" to json("app_name" to "李老师", "open_id" to "ou_bot")))
+                if (path == "/open-apis/authen/v1/user_info") return success(json("name" to "我"))
+                if (path.startsWith("/open-apis/application/")) {
+                    val brand = Brand.entries.find { bearer == "app-${it.name}" } ?: return MockResponse().setResponseCode(401)
+                    val root = "/open-apis/application/v6/applications/${brand.name}"
+                    val revision = generation.get()
+                    if (revision == 3) return raw(json("code" to 99991672, "msg" to "permission denied"))
+                    if (path == root) return success(json("app" to json("online_version_id" to "online$revision", "unaudit_version_id" to "draft")))
+                    if (path != "$root/app_versions/online$revision") return MockResponse().setResponseCode(404)
+                    val entries = if (revision == 0) rows(brand) else JSONArray().put(json("menu_id" to "new",
+                        "default_name" to "/新版", "menu_content_type" to 4))
+                    return success(json("app_version" to json("app_id" to brand.name, "version_id" to "online$revision",
+                        "ability" to json("bot" to json("bot_menu_enable" to (revision != 2), "bot_menus" to entries)))))
+                }
+                if (!path.endsWith("/im/v1/messages")) return MockResponse().setResponseCode(404)
+                if (request.method == "POST") {
+                    val body = JSONObject(request.body.readUtf8())
+                    if (body.optString("msg_type") != "text" || request.requestUrl!!.queryParameter("receive_id_type") != "chat_id")
+                        return MockResponse().setResponseCode(400)
+                    sent.add(Triple(bearer, body.getString("receive_id"), JSONObject(body.getString("content")).getString("text")))
+                }
+                return success(json("items" to JSONArray()))
+            }
+        }
+        val model = ui.runOnUiThread { ChatModel(app, ::api) }
+        ui.setContent { MaterialTheme { ChatScreen(model, Brand.entries, onCheckUpdate = {}) } }
+        fun refresh() {
+            ui.onNodeWithContentDescription("更多").performClick()
+            ui.onNodeWithText("刷新快捷菜单").performClick()
+        }
+        try {
+            for (brand in Brand.entries) {
+                generation.set(0)
+                ui.runOnIdle { model.enter(brand, restore = true); model.edit("未发送的草稿") }
+                val entries = rows(brand).let { list -> (0 until list.length()).map(list::getJSONObject) }
+                val groups = entries.filter { it.getInt("menu_content_type") == 3 }
+                var capture = brand == Brand.LARK && args.getString("captureChat") == "true"
+                for (group in groups) {
+                    val label = group.getString("default_name")
+                    waitText(label)
+                    for (command in entries.filter { it.optString("parent_menu_id") == group.getString("menu_id") && it.getInt("menu_content_type") == 4 }) {
+                        val text = command.getString("default_name")
+                        val count = sent.size
+                        ui.onNodeWithText(label).performClick()
+                        ui.onNodeWithText(text).assertIsDisplayed()
+                        if (capture) {
+                            capture = false
+                            val shot = instrumentation.uiAutomation.takeScreenshot()
+                            File(app.cacheDir, "menu-preview.png").outputStream().use { shot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                            shot.recycle()
+                        }
+                        ui.onNodeWithText(text).performClick()
+                        ui.waitUntil(10_000) { sent.size == count + 1 && !model.sending }
+                        assertEquals(Triple("user-${brand.name}", "oc_${brand.name}", text), sent.last())
+                        ui.runOnIdle { assertEquals("未发送的草稿", model.draft) }
+                    }
+                }
+                generation.set(1)
+                refresh()
+                waitText("/新版")
+                ui.onNodeWithText(groups.first().getString("default_name")).assertDoesNotExist()
+                ui.onNodeWithText("/新版").performClick()
+                ui.waitUntil(10_000) { sent.last() == Triple("user-${brand.name}", "oc_${brand.name}", "/新版") && !model.sending }
+                generation.set(2)
+                refresh()
+                ui.waitUntil(10_000) { model.menu.isEmpty() }
+                ui.onNodeWithText("/新版").assertDoesNotExist()
+                generation.set(3)
+                refresh()
+                waitText("应用缺少读取快捷菜单的权限 · 重试")
+                ui.onNodeWithContentDescription("发送").assertIsEnabled()
+                generation.set(1)
+                ui.onNodeWithText("应用缺少读取快捷菜单的权限 · 重试").performClick()
+                waitText("/新版")
+            }
+        } finally { ui.runOnIdle { model.home() } }
     }
 
     @Test fun upgradeKeepsLoginAndReplacesLegacyManualChatOnlyAfterMatchingTheBot() {

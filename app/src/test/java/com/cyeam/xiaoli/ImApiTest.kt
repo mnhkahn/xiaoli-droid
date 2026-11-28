@@ -39,6 +39,8 @@ class ImApiTest {
                 val addons = JSONObject(GZIPInputStream(ByteArrayInputStream(encoded)).bufferedReader().readText())
                 assertFalse(addons.getBoolean("preset"))
                 assertTrue(addons.getJSONObject("scopes").getJSONArray("user").toString().contains("im:resource"))
+                assertEquals("application:application:self_manage", addons.getJSONObject("scopes").getJSONArray("tenant").getString(0))
+                assertFalse("application:application:self_manage" in userScopes)
             }
             assertEquals("/oauth/v1/app/registration", server.takeRequest().path)
             repeat(if (brand == Brand.LARK) 3 else 2) { assertTrue(server.takeRequest().body.readUtf8().contains("action=poll")) }
@@ -200,5 +202,22 @@ class ImApiTest {
             }
             assertEquals(pages.size, server.requestCount)
         }
+    }
+
+    @Test fun menuUsesPlatformOrderAndOnlySendsConfiguredTextActions() {
+        fun node(id: String, type: Int, title: String, sort: Int, parent: String = "") =
+            json("menu_id" to id, "menu_content_type" to type, "default_name" to title, "sort" to sort, "parent_menu_id" to parent)
+        val rows = JSONArray().put(node("cmd2", 4, "/two", 2, "group"))
+            .put(node("link", 1, "打开网页", 1, "group")).put(node("group", 3, "Tools", 1)
+                .put("i18n_name", json("zh_cn" to "工具")))
+            .put(node("cmd1", 4, "/one now", 1, "group"))
+            .put(node("root", 4, "/direct", 0).put("parent_menu_id", JSONObject.NULL))
+            .put(node("unused", 3, "通知", 2)).put(node("event", 2, "事件", 0, "unused"))
+            .put(node("orphan", 4, "/gone", 0, "absent"))
+        val config = json("bot_menu_enable" to true, "bot_menus" to rows)
+        assertEquals(listOf(BotMenuItem.Command("root", "/direct"), BotMenuItem.Group("group", "工具",
+            listOf(BotMenuItem.Command("cmd1", "/one now"), BotMenuItem.Command("cmd2", "/two")))), decodeBotMenu(config))
+        assertTrue(decodeBotMenu(config.put("bot_menu_enable", false)).isEmpty())
+        assertTrue(decodeBotMenu(null).isEmpty())
     }
 }
