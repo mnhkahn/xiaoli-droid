@@ -1,6 +1,7 @@
 package com.cyeam.xiaoli
 
 import android.graphics.Bitmap
+import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,14 +11,25 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.AddReaction
+import androidx.compose.material.icons.outlined.Campaign
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -46,58 +58,140 @@ internal fun HistoryImage(model: ChatModel, msg: ImMessage, resource: Resource, 
 }
 
 @Composable
-internal fun CardTable(table: MessageBlock.Table) {
-    val pages = if (table.rows.isEmpty()) 1 else (table.rows.size - 1) / table.pageSize + 1
-    var selected by rememberSaveable { mutableIntStateOf(0) }
-    val page = selected.coerceIn(0, pages - 1)
-    val border = MaterialTheme.colorScheme.outlineVariant
-    Column(Modifier.padding(vertical = 4.dp).border(1.dp, border, RoundedCornerShape(8.dp)).padding(1.dp)) {
-        BoxWithConstraints {
-            val width = maxOf(maxWidth, (table.headers.size * 90).dp)
-            Column(Modifier.horizontalScroll(rememberScrollState())) {
-                (listOf(table.headers) + table.rows.drop(page * table.pageSize).take(table.pageSize)).forEachIndexed { rowIndex, row ->
-                    Row(Modifier.width(width)) {
-                        row.forEach { cell -> SelectionContainer(Modifier.weight(1f)) {
-                            Text(cell, Modifier.padding(6.dp), style = MaterialTheme.typography.bodySmall,
-                                fontWeight = if (rowIndex == 0) FontWeight.SemiBold else FontWeight.Normal)
-                        } }
-                    }
-                    HorizontalDivider(color = border)
+private fun cardTint(template: String, foreground: Boolean = false): Color = when (template.substringBefore('-')) {
+    "green" -> if (foreground) chatColor(0xff237840, 0xff8cdc9f) else chatColor(0xffecf7ef, 0xff263c2d)
+    "orange", "yellow" -> if (foreground) chatColor(0xff945500, 0xffffc375) else chatColor(0xfffff4e5, 0xff413529)
+    "red", "carmine" -> if (foreground) chatColor(0xffbf3543, 0xffff9ba3) else chatColor(0xffffeff0, 0xff462c32)
+    "purple" -> if (foreground) chatColor(0xff6745b4, 0xffcab1ff) else chatColor(0xfff3efff, 0xff392f49)
+    "grey", "gray", "neutral", "default" -> if (foreground) LocalContentColor.current else chatColor(0xfff3f4f5, 0xff31343b)
+    else -> if (foreground) chatColor(0xff245bdb, 0xff98b7ff) else chatColor(0xfff1f3ff, 0xff29354b)
+}
+
+@Composable
+internal fun MessageCard(blocks: List<MessageBlock>, quote: String?, image: @Composable (Resource) -> Unit) {
+    val header = blocks.firstOrNull() as? MessageBlock.CardHeader
+    if (header != null || quote != null) {
+        val tone = header?.template.orEmpty()
+        val pale = cardTint(tone)
+        val gradient = Brush.linearGradient(listOf(lerp(pale, cardTint(tone, true), 0.07f), pale))
+        Column(Modifier.fillMaxWidth().background(gradient).padding(horizontal = 12.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(9.dp)) {
+            if (quote != null) Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.size(2.dp, 13.dp).background(chatColor(0xff737985, 0xffabb1bd), RoundedCornerShape(1.dp)))
+                Spacer(Modifier.width(4.dp))
+                Text(quote, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    color = chatColor(0xff656c78, 0xffc1c7d1), fontSize = 14.sp, letterSpacing = 0.sp, lineHeight = 19.sp)
+            }
+            if (header != null) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (header.icon == "notice_colorful")
+                        Icon(Icons.Outlined.Campaign, null, Modifier.size(18.dp), tint = cardTint(tone, true))
+                    Text(header.title, fontSize = 17.sp, lineHeight = 23.sp, fontWeight = FontWeight.SemiBold,
+                        color = cardTint(tone, true))
                 }
+                if (header.subtitle.isNotBlank()) Text(header.subtitle, style = MaterialTheme.typography.bodySmall)
             }
         }
-        if (pages > 1) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = { selected = page - 1 }, enabled = page > 0) { Text("上一页") }
-            Text("${page + 1}/$pages", style = MaterialTheme.typography.labelMedium)
-            TextButton(onClick = { selected = page + 1 }, enabled = page + 1 < pages) { Text("下一页") }
+    }
+    val body = if (header == null) blocks else blocks.drop(1)
+    if (body.isNotEmpty()) Column(Modifier.fillMaxWidth().padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        for (block in body) when (block) {
+            is MessageBlock.Paragraph -> {
+                val tint = block.background?.takeUnless { it in setOf("none", "transparent", "default") }
+                val background = if (tint == null) Modifier else Modifier.fillMaxWidth()
+                    .background(cardTint(tint), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 5.dp)
+                Text(block.value, background, fontWeight = if (block.heading) FontWeight.Bold else FontWeight.Normal,
+                    fontSize = 15.sp, letterSpacing = 0.sp, lineHeight = 22.sp)
+            }
+            is MessageBlock.Picture -> image(block.resource)
+            is MessageBlock.Table -> CardTable(block)
+            is MessageBlock.CardHeader -> Unit
         }
     }
 }
 
-private val reactionLabels = mapOf("Typing" to "⌨️ 输入中", "OnIt" to "🫡 收到", "THINKING" to "🤔 思考",
-    "OneSecond" to "☝️ 稍等", "THUMBSUP" to "👍", "OK" to "👌", "HEART" to "❤️", "SMILE" to "🙂", "CLAP" to "👏")
+@Composable
+internal fun CardTable(table: MessageBlock.Table) {
+    val pages = if (table.rows.isEmpty()) 1 else (table.rows.size - 1) / table.pageSize + 1
+    var selected by rememberSaveable { mutableIntStateOf(0) }
+    val page = selected.coerceIn(0, pages - 1)
+    val line = chatColor(0xffdfe1e4, 0xff494d55)
+    val shape = RoundedCornerShape(8.dp)
+    Column(Modifier.fillMaxWidth().padding(end = 6.dp).clip(shape).border(1.dp, line, shape)) {
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val width = if (table.headers.size <= 2) maxWidth else maxOf(maxWidth, (table.headers.size * 90).dp)
+            val scroll = if (width > maxWidth) Modifier.horizontalScroll(rememberScrollState()) else Modifier
+            Column(scroll) {
+                Column(Modifier.width(width)) {
+                    val rows = listOf(table.headers) + table.rows.drop(page * table.pageSize).take(table.pageSize)
+                    rows.forEachIndexed { index, row ->
+                        Row(Modifier.fillMaxWidth().drawWithContent {
+                            drawContent()
+                            for (col in 1 until table.headers.size) {
+                                val x = size.width * col / table.headers.size
+                                drawLine(line, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
+                            }
+                        }, verticalAlignment = Alignment.CenterVertically) {
+                            row.forEach { cell -> TableCell(cell, index == 0, Modifier.weight(1f)) }
+                        }
+                        if (index < rows.lastIndex) HorizontalDivider(color = line)
+                    }
+                }
+            }
+        }
+        if (pages > 1) {
+            HorizontalDivider(color = line)
+            Row(Modifier.fillMaxWidth().padding(end = 4.dp).heightIn(min = 44.dp), horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically) {
+                Text("${page + 1}/$pages", fontSize = 14.sp)
+                Spacer(Modifier.width(5.dp))
+                IconButton(onClick = { selected = page - 1 }, enabled = page > 0, modifier = Modifier.width(36.dp).height(44.dp)) {
+                    Icon(Icons.Outlined.KeyboardArrowUp, "上一页", Modifier.size(20.dp),
+                        tint = if (page > 0) chatColor(0xff646a73, 0xffc9cdd4) else chatColor(0xffbfc1c6, 0xff555960))
+                }
+                IconButton(onClick = { selected = page + 1 }, enabled = page + 1 < pages, modifier = Modifier.width(36.dp).height(44.dp)) {
+                    Icon(Icons.Outlined.KeyboardArrowDown, "下一页", Modifier.size(20.dp),
+                        tint = if (page + 1 < pages) chatColor(0xff646a73, 0xffc9cdd4) else chatColor(0xffbfc1c6, 0xff555960))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TableCell(value: String, header: Boolean, modifier: Modifier) {
+    var clipped by remember(value) { mutableStateOf(false) }
+    var expanded by remember(value) { mutableStateOf(false) }
+    val read = if (clipped) Modifier.clickable(onClickLabel = "查看完整内容") { expanded = true } else Modifier
+    Box(modifier.then(read).heightIn(min = 38.dp).padding(horizontal = 10.dp, vertical = 6.dp),
+        contentAlignment = Alignment.CenterStart) {
+        Text(value, maxLines = 1, overflow = TextOverflow.Ellipsis, fontSize = 15.sp, letterSpacing = 0.sp, lineHeight = 21.sp,
+            fontWeight = if (header) FontWeight.SemiBold else FontWeight.Normal,
+            onTextLayout = { clipped = it.hasVisualOverflow })
+    }
+    if (expanded) AlertDialog(onDismissRequest = { expanded = false }, text = { SelectionContainer { Text(value) } },
+        confirmButton = { TextButton(onClick = { expanded = false }) { Text("关闭") } })
+}
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun MessageReactions(model: ChatModel, msg: ImMessage) {
-    var picker by remember(msg.id) { mutableStateOf(false) }
+    val entries = model.reactions[msg.id].orEmpty()
+    if (entries.isEmpty()) return
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        model.reactions[msg.id].orEmpty().forEach { entry ->
+        entries.forEach { entry ->
             FilterChip(selected = entry.ownId != null, enabled = !model.changingReaction,
                 onClick = { model.toggleReaction(msg.id, entry.type) },
-                label = { Text("${reactionLabels[entry.type] ?: entry.type} ${entry.count}") })
-        }
-        Box {
-            IconButton(onClick = { picker = true }, enabled = !model.changingReaction, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Outlined.AddReaction, "回复表情", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            DropdownMenu(picker, onDismissRequest = { picker = false }) {
-                listOf("THUMBSUP", "OK", "HEART", "SMILE", "CLAP", "THINKING").forEach { type ->
-                    DropdownMenuItem(text = { Text(reactionLabels.getValue(type)) },
-                        onClick = { picker = false; model.toggleReaction(msg.id, type) })
-                }
-            }
+                label = {
+                    val emoji = ChatEmoji.byType[entry.type]
+                    if (emoji == null) Text("${entry.type} ${entry.count}")
+                    else Row(Modifier.clearAndSetSemantics { contentDescription = "${emoji.label} ${entry.count}" },
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        EmojiArtwork(emoji, 20.dp, description = null)
+                        Text(if (emoji.showLabel) "${emoji.label} ${entry.count}" else entry.count.toString())
+                    }
+                })
         }
     }
 }

@@ -22,6 +22,7 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.SolidColor
@@ -172,6 +173,15 @@ internal fun MessageComposer(model: ChatModel, peerName: String) {
     CommandBar(model.menu, enabled = !model.sending && !recording, send = model::sendCommand)
     Column(Modifier.fillMaxWidth().background(chatColor(0xfff5f6f8, 0xff21242a))) {
         HorizontalDivider(color = chatColor(0xffe9eaed, 0xff363941))
+        val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+        LaunchedEffect(model.replyTo?.id) { if (model.replyTo != null) focus.requestFocus() }
+        model.replyTo?.let { target ->
+            Row(Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("回复 · ${target.text}", Modifier.weight(1f), maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.bodyMedium)
+                TextButton(onClick = { model.setReply(null) }) { Text("取消回复") }
+            }
+        }
         var editor by rememberSaveable(stateSaver = TextFieldValue.Saver) { mutableStateOf(TextFieldValue(model.draft)) }
         // Keep the IME selection while accepting location inserts and a successful send from the model.
         val value = if (editor.text == model.draft) editor else TextFieldValue(model.draft, TextRange(model.draft.length))
@@ -183,7 +193,7 @@ internal fun MessageComposer(model: ChatModel, peerName: String) {
         Surface(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, top = 8.dp),
             shape = RoundedCornerShape(14.dp), color = chatColor(0xffffffff, 0xff30333a)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                BasicTextField(value, ::change, Modifier.weight(1f).padding(start = 14.dp, top = 12.dp, bottom = 12.dp),
+                BasicTextField(value, ::change, Modifier.weight(1f).focusRequester(focus).padding(start = 14.dp, top = 12.dp, bottom = 12.dp),
                     minLines = if (expanded) 3 else 1, maxLines = if (expanded) 6 else 3,
                     textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                     cursorBrush = SolidColor(accent),
@@ -239,12 +249,12 @@ internal fun MessageComposer(model: ChatModel, peerName: String) {
             }
         }
         if (emoji && !recording) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            for (symbol in listOf("😀", "👍", "❤️", "🎉", "🙏", "👏")) {
+            for ((symbol, artwork) in composerEmoji) {
                 IconButton(onClick = {
                     val start = value.selection.min
                     val text = value.text.replaceRange(start, value.selection.max, symbol)
                     change(TextFieldValue(text, TextRange(start + symbol.length)))
-                }) { Text(symbol, style = MaterialTheme.typography.titleLarge) }
+                }) { EmojiArtwork(artwork, 29.dp) }
             }
         }
     }

@@ -180,7 +180,7 @@ class PlatformChatTest {
             instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
             ui.onNode(hasSetTextAction()).performClick().performTextInput("test")
             ui.onNodeWithContentDescription("表情").performClick()
-            ui.onNodeWithText("👍").performClick()
+            ui.onNodeWithContentDescription("赞").performClick()
             ui.runOnIdle { assertEquals("test👍", model.draft) }
             ui.onNodeWithContentDescription("发送").assertIsDisplayed().performClick()
             ui.waitUntil(10000) { sent.contains(brand.name to "oc_${brand.name}") && !model.sending }
@@ -297,24 +297,29 @@ class PlatformChatTest {
         } finally { ui.runOnIdle { model.home() } }
     }
 
-    private fun existingConversation(): ChatModel {
+    private fun existingConversation(onApproval: (Brand, Approval) -> Unit = { _, _ -> }): ChatModel {
         val store = ImStore(app)
         store.write(Brand.LARK, LoginState(AppKeys("app", "test"), UserToken("uat", "refresh",
             System.currentTimeMillis() + 3_600_000), Peer("oc_agent", "李老师")))
         store.active = Brand.LARK
         lateinit var model: ChatModel
         ui.runOnIdle { model = ChatModel(app, ::api) }
-        ui.setContent { MaterialTheme { ChatScreen(model, listOf(Brand.LARK), onCheckUpdate = {}) } }
+        ui.setContent { MaterialTheme { ChatScreen(model, listOf(Brand.LARK), onCheckUpdate = {}, launchApproval = { _, brand, ticket -> onApproval(brand, ticket) }) } }
         return model
     }
 
     @Test fun historyShowsCardPagesAndLoadsBothOlderImagesInline() {
         val headers = JSONArray().put(json("name" to "c0", "display_name" to "作业"))
             .put(json("name" to "c1", "display_name" to "状态"))
-        val rows = JSONArray().apply { for (i in 1..8) put(json("c0" to "练习 $i", "c1" to if (i < 3) "待完成" else "已完成")) }
+        val names = listOf("26秋 Lesson 11 · 背单词练习", "26秋 Lesson 11 · 听音频练习",
+            "看拼音写字", "英语单词默写改错", "四则运算", "口算练习", "语文朗读", "英语阅读")
+        val rows = JSONArray().apply { names.forEachIndexed { i, name ->
+            put(json("c0" to name, "c1" to if (i < 2) "待完成" else "已完成"))
+        } }
         val summary = "今天一共有 8 项作业，还有 2 项没完成，另外 6 项已经完成了。"
-        val card = json("schema" to "2.0", "header" to json("title" to json("content" to "今天的作业情况")),
-            "body" to json("elements" to JSONArray().put(json("tag" to "column_set", "columns" to JSONArray().put(
+        val card = json("schema" to "2.0", "header" to json("title" to json("content" to "今天的作业情况"),
+            "template" to "blue", "icon" to json("tag" to "standard_icon", "token" to "notice_colorful")),
+            "body" to json("elements" to JSONArray().put(json("tag" to "column_set", "background_style" to "blue-50", "columns" to JSONArray().put(
                 json("tag" to "column", "elements" to JSONArray().put(json("tag" to "markdown", "content" to summary))))))
                 .put(json("tag" to "table", "page_size" to 5, "columns" to headers, "rows" to rows))))
         fun item(id: String, type: String, content: JSONObject) = json("message_id" to id, "msg_type" to type,
@@ -328,10 +333,12 @@ class PlatformChatTest {
                 return when {
                     url.encodedPath.endsWith("/im/v1/messages") && url.queryParameter("card_msg_content_type") == "user_card_content" ->
                         if (url.queryParameter("page_token") == null) success(json("has_more" to true, "page_token" to "older",
-                            "items" to JSONArray().put(item("om_card","interactive",card))))
+                            "items" to JSONArray().put(item("om_card","interactive",card).put("parent_id","om_user"))
+                                .put(item("om_user","text",json("text" to "今天还有啥作业没完成？")).put("sender", json("sender_type" to "user")))))
                         else success(json("items" to JSONArray().put(item("om_photo","image",json("image_key" to "img_one")))
                             .put(item("om_post","post",json("title" to "作业图", "content" to JSONArray().put(JSONArray()
                                 .put(json("tag" to "img", "image_key" to "img_two"))))))))
+                    url.encodedPath.endsWith("/user_info") -> success(json("name" to "李超"))
                     url.encodedPath.endsWith("/resources/img_one") || url.encodedPath.endsWith("/resources/img_two") -> {
                         requests.add(url.encodedPath)
                         if (url.encodedPath.endsWith("/img_two") && !imageAvailable.get())
@@ -340,6 +347,7 @@ class PlatformChatTest {
                         val bytes = instrumentation.context.assets.open("media/sample.png").use { it.readBytes() }
                         MockResponse().setHeader("Content-Type","image/png").setBody(Buffer().write(bytes))
                     }
+                    url.encodedPath.endsWith("/pins") -> success(json("items" to JSONArray()))
                     url.encodedPath.endsWith("/reactions/batch_query") -> success(JSONObject())
                     else -> MockResponse().setResponseCode(404)
                 }
@@ -349,15 +357,48 @@ class PlatformChatTest {
         try {
             waitText(summary)
             ui.onNodeWithText("今天的作业情况").assertIsDisplayed()
-            ui.onNodeWithText("练习 5").assertExists()
-            ui.onNodeWithText("下一页").performClick()
+            waitText("李超：今天还有啥作业没完成？")
+            ui.onNodeWithText("四则运算").assertIsDisplayed()
+            ui.onNodeWithContentDescription("上一页").assertIsNotEnabled()
+            ui.onNodeWithContentDescription("爱心").assertDoesNotExist()
+            val cardNode = ui.onNodeWithTag("bubble-om_card")
+            if (InstrumentationRegistry.getArguments().getString("captureCard") == "true") {
+                val shot = cardNode.captureToImage().asAndroidBitmap()
+                File(app.cacheDir, "homework-card.png").outputStream().use { shot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+            }
+            ui.onNodeWithText(names.first()).performClick()
+            waitText("关闭")
+            ui.onNodeWithText("关闭").performClick()
+            ui.onNodeWithText(names.first()).performTouchInput { longClick() }
+            ui.onNodeWithText("关闭").assertDoesNotExist()
+            ui.onNodeWithText("回复").assertIsDisplayed()
+            ui.onNodeWithText("复制").assertDoesNotExist()
+            ui.onNodeWithText("创建话题").assertDoesNotExist()
+            for (label in listOf("OK", "捂脸", "笑哭", "Get", "斜眼笑", "泪目", "更多表情")) {
+                ui.onNodeWithContentDescription(label).assertIsDisplayed()
+            }
+            if (InstrumentationRegistry.getArguments().getString("captureSheet") == "true") {
+                waitText("Pin")
+                ui.onNodeWithContentDescription("更多表情").performClick()
+                ui.onNodeWithContentDescription("爱心").assertIsDisplayed()
+                ui.waitForIdle()
+                val shot = instrumentation.uiAutomation.takeScreenshot()
+                File(app.cacheDir, "actions-sheet.png").outputStream().use { shot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+                shot.recycle()
+            }
+            instrumentation.sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+            ui.waitUntil(4000) { ui.onAllNodesWithTag("message-actions").fetchSemanticsNodes().isEmpty() }
+            ui.onNodeWithTag("message-actions").assertDoesNotExist()
+            ui.onNodeWithContentDescription("爱心").assertDoesNotExist()
+            ui.onNodeWithContentDescription("下一页").performClick()
             ui.onNodeWithText("2/2").assertIsDisplayed()
-            ui.onNodeWithText("练习 8").assertIsDisplayed()
-            ui.onNodeWithText("上一页").performClick()
+            ui.onNodeWithText("英语阅读").assertIsDisplayed()
+            ui.onNodeWithContentDescription("下一页").assertIsNotEnabled()
+            ui.onNodeWithContentDescription("上一页").performClick()
             ui.onNodeWithText("1/2").assertExists()
             ui.onNodeWithTag("chat-history").performScrollToNode(hasText("查看更早的消息"))
             ui.onNodeWithText("查看更早的消息").performClick()
-            ui.waitUntil(10_000) { model.messages.size == 3 }
+            ui.waitUntil(10_000) { model.messages.size == 4 }
             for ((id, key) in listOf("om_photo" to "img_one", "om_post" to "img_two")) {
                 ui.onNodeWithTag("chat-history").performScrollToKey(id)
                 ui.waitUntil(10_000) { requests.contains("/open-apis/im/v1/messages/$id/resources/$key") }
@@ -418,14 +459,155 @@ class PlatformChatTest {
         try {
             waitText("今天还有啥作业没完成？")
             ui.waitUntil(8000) { requestCount.get() > 0 }
-            working.set(true); waitText("⌨️ 输入中 1")
+            working.set(true)
+            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("输入中 1").fetchSemanticsNodes().isNotEmpty() }
             working.set(false)
-            ui.waitUntil(8000) { ui.onAllNodesWithText("⌨️ 输入中 1").fetchSemanticsNodes().isEmpty() }
-            ui.onNodeWithContentDescription("回复表情").performClick()
-            ui.onNodeWithText("❤️").performClick()
-            waitText("❤️ 1")
-            ui.onNodeWithText("❤️ 1").performClick()
-            ui.waitUntil(8000) { !liked.get() && ui.onAllNodesWithText("❤️ 1").fetchSemanticsNodes().isEmpty() }
+            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("输入中 1").fetchSemanticsNodes().isEmpty() }
+            ui.onNodeWithContentDescription("回复表情").assertDoesNotExist()
+            val question = ui.onNodeWithText("今天还有啥作业没完成？")
+            question.performTouchInput { click() }
+            ui.onNodeWithContentDescription("爱心").assertDoesNotExist()
+            question.performTouchInput { longClick() }
+            ui.onNodeWithContentDescription("更多表情").performClick()
+            ui.onNodeWithContentDescription("爱心").performClick()
+            ui.waitUntil(8000) { ui.onAllNodesWithContentDescription("爱心 1").fetchSemanticsNodes().isNotEmpty() }
+            ui.onNodeWithContentDescription("爱心 1").performClick()
+            ui.waitUntil(8000) { !liked.get() && ui.onAllNodesWithContentDescription("爱心 1").fetchSemanticsNodes().isEmpty() }
+        } finally { ui.runOnIdle { model.home() } }
+    }
+
+    @Test fun longPressActionsUseTheSelectedMessageAndKeepTopSeparateFromPin() {
+        val title = "核对今天的作业"
+        val pinned = java.util.concurrent.atomic.AtomicBoolean(false)
+        val pinFailure = java.util.concurrent.atomic.AtomicBoolean(true)
+        val replies = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
+        val tasks = java.util.concurrent.CopyOnWriteArrayList<JSONObject>()
+        val emojis = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val grants = java.util.concurrent.CopyOnWriteArrayList<String>()
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val url = request.requestUrl!!
+                val path = url.encodedPath
+                fun failure(code: Int) = MockResponse().setResponseCode(403).setBody(json("code" to code, "msg" to "denied").toString())
+                fun raw(value: JSONObject) = MockResponse().setBody(value.toString())
+                if (path == "/oauth/v1/device_authorization") {
+                    grants.add(request.body.readUtf8())
+                    return raw(json("device_code" to "task-device", "user_code" to "TASK",
+                        "verification_uri" to "https://accounts.larksuite.com/activate", "interval" to 1))
+                }
+                if (path == "/oauth/v3/token") return raw(json("access_token" to "task-user", "refresh_token" to "new-refresh", "expires_in" to 3600))
+                val token = request.getHeader("Authorization")
+                if (token !in listOf("Bearer uat", "Bearer task-user")) return failure(99991668)
+                return when {
+                    path.endsWith("/user_info") -> success(json("name" to "我", "open_id" to "ou_self"))
+                    path.endsWith("/im/v1/messages") && request.method == "GET" -> success(json("items" to JSONArray().put(json(
+                        "message_id" to "om_target", "chat_id" to "oc_agent", "msg_type" to "text", "sender" to json("sender_type" to "app"),
+                        "body" to json("content" to json("text" to title).toString())))))
+                    path.endsWith("/om_target/reply") && request.method == "POST" -> {
+                        replies.add(JSONObject(request.body.readUtf8()))
+                        if (replies.size == 1) failure(230027) else success(json("message_id" to "om_reply"))
+                    }
+                    path.endsWith("/pins") && request.method == "GET" && url.queryParameter("chat_id") == "oc_agent" ->
+                        if (url.queryParameter("page_token") == null) success(json("items" to JSONArray(), "has_more" to true, "page_token" to "next"))
+                        else success(json("items" to if (pinned.get()) JSONArray().put(json("message_id" to "om_target", "chat_id" to "oc_agent")) else JSONArray()))
+                    path.endsWith("/pins") && request.method == "POST" && JSONObject(request.body.readUtf8()).getString("message_id") == "om_target" -> {
+                        if (pinFailure.getAndSet(false)) failure(230027)
+                        else { pinned.set(true); success(json("pin" to json("message_id" to "om_target"))) }
+                    }
+                    path.endsWith("/pins/om_target") && request.method == "DELETE" -> { pinned.set(false); success(JSONObject()) }
+                    path.endsWith("/reactions/batch_query") -> success(JSONObject())
+                    path.endsWith("/om_target/reactions") && request.method == "GET" -> success(json("items" to JSONArray()))
+                    path.endsWith("/om_target/reactions") && request.method == "POST" -> {
+                        emojis.add(JSONObject(request.body.readUtf8()).getJSONObject("reaction_type").getString("emoji_type"))
+                        success(JSONObject())
+                    }
+                    path == "/open-apis/task/v2/tasks" && request.method == "POST" && url.queryParameter("user_id_type") == "open_id" -> {
+                        tasks.add(JSONObject(request.body.readUtf8()))
+                        if (token != "Bearer task-user") failure(99991679) else success(json("task" to json("guid" to "task-guid")))
+                    }
+                    else -> MockResponse().setResponseCode(404)
+                }
+            }
+        }
+        val handoffs = java.util.concurrent.CopyOnWriteArrayList<Brand>()
+        val model = existingConversation { brand, _ -> handoffs.add(brand) }
+        fun open() {
+            ui.onNodeWithTag("bubble-om_target").performTouchInput { longClick() }
+            waitText("回复")
+        }
+        fun pin(label: String) {
+            open()
+            try { waitText(label) }
+            catch (e: ComposeTimeoutException) {
+                val nodes = ui.onAllNodes(isRoot()).fetchSemanticsNodes().indices.joinToString("\n") {
+                    ui.onAllNodes(isRoot())[it].printToString(10)
+                }
+                throw AssertionError(nodes, e)
+            }
+            ui.onNodeWithText(label).performTouchInput { click() }
+            ui.waitUntil(8000) { ui.onAllNodesWithTag("message-actions").fetchSemanticsNodes().isEmpty() }
+            ui.waitUntil(8000) { !model.busy }
+        }
+        try {
+            waitText(title)
+            ui.onNodeWithText("添加任务").assertDoesNotExist()
+            for (emoji in quickReactions + moreReactions) {
+                open()
+                if (emoji in moreReactions) ui.onNodeWithContentDescription("更多表情").performClick()
+                ui.onNodeWithContentDescription(emoji.label).performClick()
+                ui.waitUntil(8000) { emoji.type in emojis && !model.changingReaction }
+            }
+            assertEquals(listOf("OK", "FACEPALM", "LOL", "Get", "GLANCE", "CRY", "THUMBSUP", "HEART", "SMILE", "CLAP", "THINKING"), emojis.toList())
+            open()
+            ui.onNodeWithText("置顶消息").performClick()
+            waitText("本机置顶 · $title")
+            ui.onNodeWithText("本机置顶 · $title").performClick()
+            assertEquals("om_target", ImStore(app).read(Brand.LARK).topId)
+            assertNull(ImStore(app).read(Brand.FEISHU).topId)
+            assertFalse(runBlocking { api(Brand.LARK).isPinned("uat", Peer("oc_agent", "李老师"), "om_target") })
+            pin("Pin")
+            assertFalse(pinned.get())
+            pin("Pin")
+            assertTrue(pinned.get())
+            pin("移除 Pin")
+            assertFalse(pinned.get())
+            assertEquals("om_target", model.topId)
+            ui.onNodeWithText("取消置顶").performClick()
+            assertNull(ImStore(app).read(Brand.LARK).topId)
+
+            open()
+            ui.onNodeWithText("回复").performClick()
+            waitText("回复 · $title")
+            ui.onNode(hasSetTextAction()).performTextInput("收到")
+            ui.onNodeWithContentDescription("发送").performClick()
+            ui.waitUntil(8000) { replies.size == 1 && !model.sending }
+            assertEquals("收到", model.draft)
+            assertEquals("om_target", model.replyTo?.id)
+            ui.onNodeWithContentDescription("发送").performClick()
+            ui.waitUntil(8000) { replies.size == 2 && model.replyTo == null }
+            assertEquals(replies[0].getString("uuid"), replies[1].getString("uuid"))
+            assertFalse(replies[1].getBoolean("reply_in_thread"))
+            assertEquals("收到", JSONObject(replies[1].getString("content")).getString("text"))
+            assertFalse(replies[1].has("receive_id"))
+
+            open()
+            ui.onNodeWithText("添加任务").performClick()
+            waitText("添加到我的任务")
+            assertTrue(tasks.isEmpty())
+            ui.onNode(hasSetTextAction() and hasText(title)).performTextReplacement("复习语文")
+            ui.onNodeWithText("创建任务").performClick()
+            waitText("授权添加任务")
+            ui.onNodeWithText("授权添加任务").performClick()
+            ui.waitUntil(10000) { model.taskDraft?.needsAuthorization == false && !model.busy }
+            assertEquals(listOf(Brand.LARK), handoffs.toList())
+            assertTrue(java.net.URLDecoder.decode(grants.single(), "UTF-8").contains(taskScope))
+            ui.onNodeWithText("创建任务").performClick()
+            ui.waitUntil(8000) { model.taskDraft == null }
+            assertEquals(2, tasks.size)
+            assertEquals(tasks.first().getString("client_token"), tasks.last().getString("client_token"))
+            assertEquals("复习语文", tasks.last().getString("summary"))
+            assertEquals(title, tasks.last().getString("description"))
+            assertEquals("ou_self", tasks.last().getJSONArray("members").getJSONObject(0).getString("id"))
         } finally { ui.runOnIdle { model.home() } }
     }
 

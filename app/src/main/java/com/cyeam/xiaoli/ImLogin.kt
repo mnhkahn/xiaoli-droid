@@ -9,6 +9,7 @@ import okhttp3.Credentials
 import org.json.JSONArray
 import org.json.JSONObject
 
+internal const val taskScope = "task:task:writeonly"
 internal val userScopes = listOf("im:chat:read", "im:message:readonly", "im:message.p2p_msg:get_as_user",
     "im:message.send_as_user", "im:message", "im:resource", "offline_access")
 
@@ -43,7 +44,7 @@ internal class ImLogin(private val api: ImApi) {
             if (url.host == "open.${issuer.domain}" && url.encodedPath == "/page/launcher") {
                 link.host("open.${api.brand.domain}")
             }
-            val addons = json("preset" to false, "scopes" to json("user" to JSONArray(userScopes),
+            val addons = json("preset" to false, "scopes" to json("user" to JSONArray(userScopes + taskScope),
                 "tenant" to JSONArray().put("application:application:self_manage")))
             val bytes = ByteArrayOutputStream()
             GZIPOutputStream(bytes).use { it.write(addons.toString().toByteArray()) }
@@ -118,9 +119,9 @@ internal class ImLogin(private val api: ImApi) {
         return AppKeys(keys.getString("client_id"), keys.getString("client_secret"))
     }
 
-    suspend fun signIn(keys: AppKeys, pending: Approval? = null, show: suspend (Approval) -> Unit): UserToken {
+    suspend fun signIn(keys: AppKeys, pending: Approval? = null, scopes: List<String> = userScopes, show: suspend (Approval) -> Unit): UserToken {
         val ticket = pending ?: ticket(api.form("/oauth/v1/device_authorization", mapOf("client_id" to keys.id,
-            "scope" to userScopes.joinToString(" ")), Credentials.basic(keys.id, keys.secret)), false)
+            "scope" to scopes.joinToString(" ")), Credentials.basic(keys.id, keys.secret)), false)
         val result = approve(ticket, show) {
             api.form(tokenPath, mapOf("grant_type" to "urn:ietf:params:oauth:grant-type:device_code",
                 "device_code" to it, "client_id" to keys.id, "client_secret" to keys.secret))

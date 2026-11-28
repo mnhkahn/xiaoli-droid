@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-RELEASE_NOTES = '历史图片可直接查看，作业卡片支持阅读正文和翻页。聊天会同步李老师的表情，也可以添加或撤销自己的表情。'
+RELEASE_NOTES = '长按消息可选飞书表情、引用回复、Pin、本机置顶或添加任务。作业卡片按飞书和 Lark 的样式展示摘要和分页表格，点省略的单元格可查看全文。'
 
 def make_manifest(apk, version, code, tag, pgyer):
     return {'versionName':version,'versionCode':int(code),'apkUrl':f'https://github.com/mnhkahn/xiaoli-droid/releases/download/{tag}/xiaoli.apk','sha256':hashlib.sha256(apk.read_bytes()).hexdigest(),'pgyerUrl':pgyer,'notes':RELEASE_NOTES}

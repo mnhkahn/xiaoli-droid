@@ -33,7 +33,7 @@ internal data class AppBot(val appId: String, val openId: String, val name: Stri
 internal data class Resource(val key: String, val type: String, val name: String)
 internal enum class Sender { USER, BOT, OTHER }
 internal data class ImMessage(val id: String, val text: String, val resource: Resource?, val sender: Sender, val type: String,
-    val blocks: List<MessageBlock> = emptyList(), val deleted: Boolean = false) {
+    val blocks: List<MessageBlock> = emptyList(), val deleted: Boolean = false, val parentId: String? = null) {
     fun contains(resource: Resource) = !deleted && (this.resource == resource || MessageBlock.Picture(resource) in blocks)
 }
 internal data class EmojiReaction(val type: String, val count: Int, val ownId: String? = null)
@@ -92,7 +92,12 @@ internal fun decodeMessage(item: JSONObject): ImMessage {
             else label.ifBlank { "位置" }
         }
         resource != null -> resource.name
-        blocks.isNotEmpty() -> blocks.filterIsInstance<MessageBlock.Paragraph>().joinToString("\n") { it.value }
+        blocks.isNotEmpty() -> blocks.joinToString("\n") { block -> when (block) {
+            is MessageBlock.CardHeader -> listOf(block.title, block.subtitle).filter(String::isNotBlank).joinToString("\n")
+            is MessageBlock.Paragraph -> block.value
+            is MessageBlock.Table -> (listOf(block.headers) + block.rows).joinToString("\n") { it.joinToString("\t") }
+            is MessageBlock.Picture -> block.resource.name
+        } }
         else -> buildList { readableParts(body, this) }.distinct().joinToString("\n").ifBlank { "[$type 消息]" }
     }
     val sender = when (item.optJSONObject("sender")?.optString("sender_type")) {
@@ -100,7 +105,8 @@ internal fun decodeMessage(item: JSONObject): ImMessage {
         "app", "bot" -> Sender.BOT
         else -> Sender.OTHER
     }
-    return ImMessage(item.getString("message_id"), message, resource.takeUnless { item.optBoolean("deleted") }, sender, type, blocks, item.optBoolean("deleted"))
+    return ImMessage(item.getString("message_id"), message, resource.takeUnless { item.optBoolean("deleted") }, sender, type, blocks, item.optBoolean("deleted"),
+        (item.opt("parent_id") as? String)?.takeIf(String::isNotBlank))
 }
 
 internal class ImApi(
@@ -263,10 +269,44 @@ internal class ImApi(
         }
     }
 
-    fun send(token: String, peer: Peer, type: String, content: JSONObject, uuid: String) {
-        val body = json("receive_id" to peer.id, "msg_type" to type, "content" to content.toString(), "uuid" to uuid)
-        data(request(token, "messages", mapOf("receive_id_type" to "chat_id"),
-            body.toString().toRequestBody("application/json".toMediaType())))
+    fun send(token: String, peer: Peer, type: String, content: JSONObject, uuid: String, replyTo: String? = null) {
+        val body = json("msg_type" to type, "content" to content.toString(), "uuid" to uuid)
+        if (replyTo == null) {
+            body.put("receive_id", peer.id)
+            data(request(token, "messages", mapOf("receive_id_type" to "chat_id"), body.asBody()))
+        } else {
+            body.put("reply_in_thread", false)
+            data(request(token, "messages/$replyTo/reply", emptyMap(), body.asBody()))
+        }
+    }
+
+    private fun JSONObject.asBody() = toString().toRequestBody("application/json".toMediaType())
+
+    fun isPinned(token: String, peer: Peer, messageId: String): Boolean {
+        val params = mutableMapOf("chat_id" to peer.id, "page_size" to "50")
+        val visited = mutableSetOf<String>()
+        while (true) {
+            val page = data(request(token, "pins", params))
+            if (page.rows().any { it.optString("message_id") == messageId && it.optString("chat_id", peer.id) == peer.id }) return true
+            if (!page.optBoolean("has_more")) return false
+            val next = page.nextToken()
+            if (next == null || !visited.add(next)) throw IOException("无法读取完整的 Pin 列表")
+            params["page_token"] = next
+        }
+    }
+
+    fun setPin(token: String, messageId: String, pin: Boolean) {
+        val req = if (pin) request(token, "pins", emptyMap(), json("message_id" to messageId).asBody())
+            else request(token, "pins/$messageId", emptyMap()).newBuilder().delete().build()
+        response(req)
+    }
+
+    fun createTask(token: String, title: String, description: String, assignee: String, clientToken: String) {
+        val url = open.newBuilder().addPathSegments("open-apis/task/v2/tasks").addQueryParameter("user_id_type", "open_id").build()
+        val body = json("summary" to title, "description" to description, "client_token" to clientToken,
+            "members" to JSONArray().put(json("id" to assignee, "type" to "user", "role" to "assignee")))
+        val task = data(Request.Builder().url(url).header("Authorization", "Bearer $token").post(body.asBody()).build())
+        require(task.getJSONObject("task").getString("guid").isNotBlank()) { "开放平台未返回任务 ID" }
     }
 
     fun upload(token: String, name: String, body: RequestBody, type: String, durationMs: Long): JSONObject {

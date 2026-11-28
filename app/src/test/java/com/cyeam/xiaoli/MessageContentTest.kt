@@ -8,16 +8,16 @@ import org.junit.Test
 
 class MessageContentTest {
     @Test fun rawCardComponentsAndLegacyRichMessages() {
-        val body = JSONObject("""{"schema":"2.0","header":{"title":{"content":"进度"}},"body":{"elements":[
-          {"tag":"column_set","columns":[{"tag":"column","elements":[{"tag":"markdown","content":"八项作业"}]}]},
+        val body = JSONObject("""{"schema":"2.0","header":{"title":{"content":"进度"},"template":"blue","icon":{"token":"notice_colorful"}},"body":{"elements":[
+          {"tag":"column_set","background_style":"blue-50","columns":[{"tag":"column","elements":[{"tag":"markdown","content":"八项作业"}]}]},
           {"tag":"table","columns":[{"name":"b","display_name":"作业"},{"name":"a","display_name":"状态"}],
            "page_size":5,"rows":[{"a":"待完成","b":"阅读"},{"a":"已完成","b":"默写"}]}]}}""")
         val card = messageBlocks("interactive", body)
-        assertEquals(MessageBlock.Paragraph("进度", true), card[0])
-        assertEquals(MessageBlock.Paragraph("八项作业"), card[1])
+        assertEquals(MessageBlock.CardHeader("进度", "blue", "notice_colorful", ""), card[0])
+        assertEquals(MessageBlock.Paragraph("八项作业", background = "blue-50"), card[1])
         assertEquals(MessageBlock.Table(listOf("作业","状态"), listOf(listOf("阅读","待完成"),listOf("默写","已完成")),5),card[2])
         val legacy = JSONObject("""{"title":"旧卡片","elements":[[{"tag":"text","text":"正文"}]]}""")
-        assertEquals(listOf(MessageBlock.Paragraph("旧卡片",true),MessageBlock.Paragraph("正文")), messageBlocks("interactive",legacy))
+        assertEquals(listOf(MessageBlock.CardHeader("旧卡片","","",""),MessageBlock.Paragraph("正文")), messageBlocks("interactive",legacy))
         val post = JSONObject("""{"zh_cn":{"content":[[{"tag":"text","text":"图前"},{"tag":"img","image_key":"img_sample"},{"tag":"text","text":"图后"}]]}}""")
         val parsed = messageBlocks("post",post)
         assertEquals(listOf(MessageBlock.Paragraph("图前"),MessageBlock.Picture(Resource("img_sample","image","图片.jpg")),MessageBlock.Paragraph("图后")),parsed)

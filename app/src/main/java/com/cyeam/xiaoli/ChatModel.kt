@@ -27,6 +27,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import okhttp3.RequestBody
 
+internal data class TaskDraft(val sourceId: String, val title: String, val clientToken: String = UUID.randomUUID().toString(),
+    val needsAuthorization: Boolean = false)
+
 internal class ChatModel @JvmOverloads constructor(app: Application, private val platform: (Brand) -> ImApi = { ImApi(it) }) : AndroidViewModel(app) {
     private val store = ImStore(app)
     private var session = newScope()
@@ -59,6 +62,10 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
     var error by mutableStateOf<String?>(null); private set
     var historyError by mutableStateOf<String?>(null); private set
     var draft by mutableStateOf(""); private set
+    var replyTo by mutableStateOf<ImMessage?>(null); private set
+    var topId by mutableStateOf<String?>(null); private set
+    var taskDraft by mutableStateOf<TaskDraft?>(null); private set
+    private var taskAuthorization: Job? = null
     private var draftId = UUID.randomUUID().toString()
 
     init { store.active?.let { enter(it, restore = true) } }
@@ -82,6 +89,10 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         reactionError = null
         changingReaction = false
         thumbnails.evictAll()
+        replyTo = null
+        topId = null
+        taskDraft = null
+        taskAuthorization = null
         edit("")
     }
 
@@ -98,6 +109,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         account = state
         signedIn = state.token != null
         selected = state.peer
+        topId = state.topId
     }
 
     fun enter(value: Brand, restore: Boolean = false) {
@@ -111,6 +123,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
             account = store.read(value)
             signedIn = account.token != null
             selected = account.peer.takeIf { signedIn }
+            topId = account.topId.takeIf { selected != null }
             store.active = value
             if (selected != null) loadProfiles()
             else if (signedIn) connect()
@@ -140,7 +153,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
             persist(LoginState(keys = it))
         }
         approval = null
-        val token = withContext(Dispatchers.IO) { flow.signIn(keys, pending?.takeUnless { it.registration }, ::show) }
+        val token = withContext(Dispatchers.IO) { flow.signIn(keys, pending?.takeUnless { it.registration }, show = ::show) }
         approval = null
         persist(LoginState(keys, token))
         connectAppChat()
@@ -253,6 +266,7 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
             older = page.next.takeUnless { it == cursor }
         }
         historyError = null
+        if (items.any { it.deleted && it.id == topId }) persist(account.copy(topId = null))
     }
 
     fun refreshMenu() {
@@ -293,6 +307,116 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
     fun edit(value: String) { draft = value; draftId = UUID.randomUUID().toString() }
     fun notice(message: String) { error = message }
 
+    private fun message(id: String) = messages.firstOrNull { it.id == id && !it.deleted }
+        ?: throw IllegalStateException("这条消息已撤回或不在当前会话中")
+
+    fun setReply(id: String?) {
+        replyTo = id?.let { key -> messages.firstOrNull { it.id == key && !it.deleted } ?: return notice("这条消息已不可用") }
+        draftId = UUID.randomUUID().toString()
+    }
+
+    fun setTop(id: String?) {
+        if (id != null && messages.none { it.id == id && !it.deleted }) return notice("这条消息已不可用")
+        persist(account.copy(topId = id))
+    }
+
+    suspend fun locateTop(id: String): Int? {
+        val peer = selected ?: return null
+        val seen = mutableSetOf<String>()
+        while (topId == id && selected == peer) {
+            val index = messages.indexOfFirst { it.id == id }
+            if (index >= 0) return index
+            val cursor = older ?: break
+            if (!seen.add(cursor)) break
+            loadHistory(peer, cursor)
+        }
+        return null
+    }
+
+    fun loadPin(id: String, result: (Result<Boolean>) -> Unit): Job = session.launch {
+        try {
+            message(id)
+            val peer = requireNotNull(selected)
+            val pinned = withToken { client, token -> client.isPinned(token, peer, id) }
+            result(Result.success(pinned))
+        } catch (e: CancellationException) { throw e }
+        catch (e: Exception) { result(Result.failure(e)) }
+    }
+
+    fun setPin(id: String, pinned: Boolean) = work {
+        message(id)
+        withToken { client, token -> client.setPin(token, id, pinned) }
+        feedback(if (pinned) "已 Pin 消息" else "已移除 Pin")
+    }
+
+    private fun feedback(text: String) =
+        android.widget.Toast.makeText(getApplication<Application>(), text, android.widget.Toast.LENGTH_SHORT).show()
+
+    fun startTask(id: String) {
+        val source = messages.firstOrNull { it.id == id && !it.deleted } ?: return notice("这条消息已不可用")
+        error = null
+        taskDraft = TaskDraft(id, source.text.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty().take(120))
+    }
+
+    fun editTask(title: String) {
+        if (!busy && title.length <= 3000) taskDraft = taskDraft?.copy(title = title, clientToken = UUID.randomUUID().toString())
+    }
+
+    fun cancelTask() {
+        if (busy && taskAuthorization == null) return
+        taskAuthorization?.cancel()
+        approval = null
+        taskDraft = null
+        error = null
+    }
+
+    private suspend fun ownId(): String = requireNotNull((userProfile?.openId
+        ?: withToken { client, token -> client.userProfile(token) }.also { userProfile = it }.openId)?.takeIf(String::isNotBlank)) {
+        "无法确认当前用户，请重新登录后再试"
+    }
+
+    fun createTask() = work {
+        val draft = taskDraft ?: return@work
+        val source = message(draft.sourceId)
+        val title = draft.title.trim()
+        if (title.isEmpty()) return@work
+        val assignee = ownId()
+        try {
+            withToken { client, token -> client.createTask(token, title, source.text.take(3000), assignee, draft.clientToken) }
+        } catch (e: ImFailure) {
+            if (e.code !in setOf(99991672, 99991679)) throw e
+            taskDraft = draft.copy(needsAuthorization = true)
+            notice(if (e.code == 99991672) "请在应用后台开通并发布用户权限 $taskScope，然后授权添加任务。"
+                else "需要你授权小李以当前账号创建任务。")
+            return@work
+        }
+        taskDraft = null
+        feedback("已添加到我的任务")
+    }
+
+    fun authorizeTasks() = work {
+        val editor = taskDraft ?: return@work
+        val job = kotlinx.coroutines.currentCoroutineContext()[Job]
+        taskAuthorization = job
+        try { grantTaskAccess(editor) }
+        finally { if (taskAuthorization === job) taskAuthorization = null }
+    }
+
+    private suspend fun grantTaskAccess(editor: TaskDraft) {
+        val keys = requireNotNull(account.keys)
+        val identity = ownId()
+        val client = api
+        val token = withContext(Dispatchers.IO) {
+            ImLogin(client).signIn(keys, scopes = userScopes + taskScope) { ticket ->
+                withContext(Dispatchers.Main.immediate) { approval = ticket }
+            }
+        }
+        val profile = withContext(Dispatchers.IO) { client.userProfile(token.access) }
+        require(profile.openId == identity) { "请使用当前聊天账号授权任务" }
+        persist(account.copy(token = token))
+        taskDraft = editor.copy(needsAuthorization = false)
+    }
+
     private fun send(block: suspend (Peer) -> Unit) {
         val peer = selected ?: return
         if (sending) return
@@ -313,7 +437,10 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         val text = draft.trim()
         if (text.isEmpty()) return
         val id = draftId
-        sendText(text, id) { if (draftId == id) edit("") }
+        val target = replyTo
+        sendText(text, id, target) {
+            if (draftId == id) { edit(""); setReply(null) }
+        }
     }
 
     fun sendCommand(command: BotMenuItem.Command) {
@@ -321,19 +448,23 @@ internal class ChatModel @JvmOverloads constructor(app: Application, private val
         sendText(command.label, UUID.randomUUID().toString())
     }
 
-    private fun sendText(text: String, id: String, onSent: () -> Unit = {}) {
+    private fun sendText(text: String, id: String, target: ImMessage? = null, onSent: () -> Unit = {}) {
         send { peer ->
-            withToken { client, access -> client.send(access, peer, "text", json("text" to text), id) }
+            val parent = target?.let { message(it.id).id }
+            withToken { client, access -> client.send(access, peer, "text", json("text" to text), id, parent) }
             onSent()
         }
     }
 
     fun sendAttachment(name: String, body: RequestBody, type: String, durationMs: Long = 0, done: () -> Unit = {}) {
         val id = UUID.randomUUID().toString()
+        val target = replyTo
         send { peer ->
             try {
+                val parent = target?.let { message(it.id).id }
                 val content = withToken { client, access -> client.upload(access, name, body, type, durationMs) }
-                withToken { client, access -> client.send(access, peer, type, content, id) }
+                withToken { client, access -> client.send(access, peer, type, content, id, parent) }
+                if (target != null && replyTo == target) setReply(null)
             } finally { done() }
         }
     }

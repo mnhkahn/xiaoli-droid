@@ -39,6 +39,7 @@ class ImApiTest {
                 val addons = JSONObject(GZIPInputStream(ByteArrayInputStream(encoded)).bufferedReader().readText())
                 assertFalse(addons.getBoolean("preset"))
                 assertTrue(addons.getJSONObject("scopes").getJSONArray("user").toString().contains("im:resource"))
+                assertTrue(addons.getJSONObject("scopes").getJSONArray("user").toString().contains(taskScope))
                 assertEquals("application:application:self_manage", addons.getJSONObject("scopes").getJSONArray("tenant").getString(0))
                 assertFalse("application:application:self_manage" in userScopes)
             }
@@ -50,7 +51,9 @@ class ImApiTest {
             val auth = server.takeRequest()
             assertEquals("/oauth/v1/device_authorization", auth.path)
             assertTrue(auth.getHeader("Authorization")!!.startsWith("Basic "))
-            assertTrue(auth.body.readUtf8().contains("offline_access"))
+            val scopes = java.net.URLDecoder.decode(auth.body.readUtf8(), "UTF-8")
+            assertTrue(scopes.contains("offline_access"))
+            assertFalse(scopes.contains(taskScope))
             assertEquals("/oauth/v3/token", server.takeRequest().path)
             server.reply(json("access_token" to "next", "refresh_token" to "r2"))
             assertEquals("r2", login.refresh(keys, token).refresh)

@@ -11,7 +11,8 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import org.json.JSONObject
 
-internal data class LoginState(val keys: AppKeys? = null, val token: UserToken? = null, val peer: Peer? = null, val pending: Approval? = null)
+internal data class LoginState(val keys: AppKeys? = null, val token: UserToken? = null, val peer: Peer? = null, val pending: Approval? = null,
+    val topId: String? = null)
 
 internal class ImStore(context: Context) {
     private val prefs = context.getSharedPreferences("open-platform", Context.MODE_PRIVATE)
@@ -57,7 +58,7 @@ internal class ImStore(context: Context) {
         val pending = data.optJSONObject("pending")?.let { Approval(it.getString("url"), it.getString("code"),
             it.getBoolean("registration"), it.getString("device"), it.getLong("until"), it.getLong("interval"),
             Brand.entries.find { brand -> brand.name == it.optString("registrationPollBrand") }) }
-        return LoginState(keys, token, peer, pending)
+        return LoginState(keys, token, peer, pending, peer?.let { data.optJSONObject("appChat")?.optString("topId")?.takeIf(String::isNotBlank) })
     }
 
     @Synchronized
@@ -68,7 +69,7 @@ internal class ImStore(context: Context) {
         val data = JSONObject()
         state.keys?.let { data.put("app", json("id" to it.id, "secret" to it.secret)) }
         state.token?.let { data.put("user", json("access" to it.access, "refresh" to it.refresh, "until" to it.until)) }
-        state.peer?.let { data.put("appChat", json("appId" to requireNotNull(state.keys).id, "id" to it.id, "name" to it.name)) }
+        state.peer?.let { data.put("appChat", json("appId" to requireNotNull(state.keys).id, "id" to it.id, "name" to it.name).put("topId", state.topId)) }
         state.pending?.let { ticket ->
             val pending = json("url" to ticket.url, "code" to ticket.code, "registration" to ticket.registration,
                 "device" to ticket.device, "until" to ticket.until, "interval" to ticket.interval)

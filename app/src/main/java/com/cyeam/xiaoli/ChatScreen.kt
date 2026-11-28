@@ -24,6 +24,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -33,6 +35,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
 
 internal fun approvalIntent(brand: Brand, approval: Approval): Intent {
@@ -65,6 +69,7 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
         val ticket = model.approval ?: return
         val provider = model.brand ?: return
         if (ticket.until <= System.currentTimeMillis()) {
+            if (model.signedIn) { model.notice("确认码已过期，请重新授权添加任务"); return }
             openOnReady = true
             model.renewLoginLink()
             return
@@ -80,7 +85,7 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
         if (brand != null && !model.signedIn && brand !in clients) {
             openOnReady = false
             model.home()
-        } else if (openOnReady && pending != null && brand != null) {
+        } else if ((openOnReady || model.taskDraft != null) && pending != null && brand != null) {
             lifecycle.currentStateFlow.first { it.isAtLeast(Lifecycle.State.RESUMED) }
             openCurrentApproval()
         }
@@ -131,8 +136,8 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
                 }
             }
             if (peer != null) HorizontalDivider(color = chatColor(0xffeceef1, 0xff373a41))
-            model.error?.let { Text(it, Modifier.padding(horizontal = if (peer == null) 0.dp else 12.dp), color = MaterialTheme.colorScheme.error) }
-            launchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            if (model.taskDraft == null) model.error?.let { Text(it, Modifier.padding(horizontal = if (peer == null) 0.dp else 12.dp), color = MaterialTheme.colorScheme.error) }
+            if (model.taskDraft == null) launchError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             if (brand == null) {
                 Text(if (clients.isEmpty()) "请先安装或启用 Lark 或飞书，再返回小李登录。" else "在开放平台选中你的智能体应用，登录后直接进入和它的单聊。")
                 for (entry in clients) Button(onClick = { openOnReady = true; model.enter(entry) }, modifier = Modifier.fillMaxWidth()) {
@@ -162,6 +167,7 @@ internal fun ChatScreen(model: ChatModel, clients: List<Brand>, onCheckUpdate: (
             if (!model.signedIn) TextButton(onClick = onCheckUpdate) { Text("检查更新") }
         }
     }
+    model.taskDraft?.let { MessageTaskDialog(model, it, launchError, ::openCurrentApproval) }
     if (confirmLogout) AlertDialog(onDismissRequest = { confirmLogout = false },
         title = { Text(if (model.signedIn) "断开与智能体的连接？" else "重置本机连接？") },
         text = { Text("下次连接需要重新选择智能体应用并授权账号。") },
@@ -190,6 +196,12 @@ private fun ColumnScope.Conversation(model: ChatModel, peerName: String) {
     model.historyError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    var actionId by rememberSaveable { mutableStateOf<String?>(null) }
+    var sheetHeight by remember(actionId) { mutableIntStateOf(0) }
+    var composerHeight by remember { mutableIntStateOf(0) }
+    val selection = remember(actionId) { listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == actionId } }
+    val originalViewportHeight = remember(actionId) { listState.layoutInfo.viewportSize.height }
     LaunchedEffect(model, lifecycle, model.brand, model.selected) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             snapshotFlow { listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String } }
@@ -197,23 +209,58 @@ private fun ColumnScope.Conversation(model: ChatModel, peerName: String) {
         }
     }
     model.reactionError?.let { Text(it, Modifier.padding(horizontal = 12.dp), style = MaterialTheme.typography.labelSmall) }
+    val messagesById = remember(model.messages) { model.messages.associateBy { it.id } }
+    val actionMessage = messagesById[actionId]
+    if (actionMessage != null && !actionMessage.deleted) MessageActions(model, actionMessage, { sheetHeight = it }) { actionId = null }
+    else if (actionId != null) LaunchedEffect(actionId) { actionId = null }
+    model.topId?.let { id ->
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(modifier = Modifier.weight(1f), onClick = {
+                scope.launch {
+                    try {
+                        val index = model.locateTop(id)
+                        if (index == null) model.notice("当前会话中找不到这条置顶消息") else listState.scrollToItem(index)
+                    } catch (e: CancellationException) { throw e }
+                    catch (e: Exception) { model.notice(e.message ?: "无法定位消息") }
+                }
+            }) {
+                Text("本机置顶 · ${messagesById[id]?.text ?: "查看原消息"}", maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            TextButton(onClick = { model.setTop(null) }) { Text("取消置顶") }
+        }
+    }
     LazyColumn(Modifier.weight(1f).fillMaxWidth().testTag("chat-history"), state = listState, reverseLayout = true,
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(model.messages, key = { it.id }) { msg ->
-            MessageBubble(msg.sender, if (msg.sender == Sender.USER) model.userProfile else model.botProfile,
-                peerName) {
+            MessageBubble(model, msg, peerName, onActions = { actionId = msg.id }) {
                 fun openImage(resource: Resource) = model.preview(msg, resource) { preview = it to "image" }
-                if (msg.blocks.isNotEmpty()) {
+                val parent = messagesById[msg.parentId]
+                val quote = parent?.let {
+                    val author = when (it.sender) {
+                        Sender.USER -> model.userProfile?.name ?: "我"
+                        Sender.BOT -> peerName
+                        Sender.OTHER -> ""
+                    }
+                    listOf(author, it.text).filter(String::isNotBlank).joinToString("：")
+                }
+                val card = msg.type == "interactive" && msg.blocks.isNotEmpty()
+                if (!card && !msg.deleted && msg.parentId != null) {
+                    Text(quote ?: "回复消息", style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                }
+                if (card) {
+                    MessageCard(msg.blocks, quote) { resource -> HistoryImage(model, msg, resource) { openImage(resource) } }
+                } else if (msg.blocks.isNotEmpty()) {
                     for (block in msg.blocks) when (block) {
-                        is MessageBlock.Paragraph -> SelectionContainer { Text(block.value,
-                            Modifier.padding(vertical = 2.dp), fontWeight = if (block.heading) FontWeight.Bold else FontWeight.Normal,
-                            color = if (block.heading) MaterialTheme.colorScheme.primary else LocalContentColor.current) }
-                        is MessageBlock.Table -> CardTable(block)
+                        is MessageBlock.Paragraph -> Text(block.value, Modifier.padding(vertical = 2.dp),
+                            fontWeight = if (block.heading) FontWeight.Bold else FontWeight.Normal)
                         is MessageBlock.Picture -> HistoryImage(model, msg, block.resource) { openImage(block.resource) }
+                        else -> Unit
                     }
                 } else if (msg.resource?.type == "image") {
                     HistoryImage(model, msg, msg.resource) { openImage(msg.resource) }
-                } else SelectionContainer { Text(msg.text) }
+                } else Text(msg.text)
                 val link = android.util.Patterns.WEB_URL.matcher(msg.text).let { if (it.find()) it.group() else null }
                 if (link != null && link.startsWith("https://")) TextButton(onClick = {
                     try { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
@@ -227,10 +274,18 @@ private fun ColumnScope.Conversation(model: ChatModel, peerName: String) {
                     TextButton(onClick = { savingId = msg.id; save.launch(resource.name.substringAfterLast('/').substringAfterLast('\\')) },
                         enabled = !model.busy) { Text("保存附件") }
                 }
-                if (!msg.deleted) MessageReactions(model, msg)
             }
         }
         if (model.older != null) item { TextButton(onClick = model::loadOlder, enabled = !model.busy) { Text("查看更早的消息") } }
     }
-    MessageComposer(model, peerName)
+    // Lift a short message above the modal when it would be covered. Large cards keep
+    // their reading position, including the header and the page the user long-pressed.
+    if (actionMessage != null && selection != null && sheetHeight > 0) {
+        val density = LocalDensity.current
+        val overlap = sheetHeight + with(density) { 16.dp.roundToPx() } - composerHeight - selection.offset.coerceAtLeast(0)
+        if (overlap > 0 && selection.size + sheetHeight < originalViewportHeight) {
+            Spacer(Modifier.height(with(density) { overlap.toDp() }))
+        }
+    }
+    Column(Modifier.onSizeChanged { composerHeight = it.height }) { MessageComposer(model, peerName) }
 }
