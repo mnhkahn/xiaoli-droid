@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-RELEASE_NOTES = '飞书和 Lark 登录改用官方确认页，可重新获取失效的链接。支持在小李内下载并校验更新，下载完成后可直接打开系统安装器。'
+RELEASE_NOTES = '小李会识别手机上已安装的飞书或 Lark，点登录直接打开对应客户端授权。'
 
 def make_manifest(apk, version, code, tag, pgyer):
     return {'versionName':version,'versionCode':int(code),'apkUrl':f'https://github.com/mnhkahn/xiaoli-droid/releases/download/{tag}/xiaoli.apk','sha256':hashlib.sha256(apk.read_bytes()).hexdigest(),'pgyerUrl':pgyer,'notes':RELEASE_NOTES}

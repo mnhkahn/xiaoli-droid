@@ -96,11 +96,11 @@ class PlatformChatTest {
         lateinit var model: ChatModel
         ui.activity.runOnUiThread { model = ChatModel(app, ::api) }
         val launched = java.util.concurrent.CopyOnWriteArrayList<Brand>()
-        ui.setContent { MaterialTheme { ChatScreen(model, onCheckUpdate = {}) { _, brand, _ -> launched.add(brand) } } }
+        ui.setContent { MaterialTheme { ChatScreen(model, Brand.entries, onCheckUpdate = {}) { _, brand, _ -> launched.add(brand) } } }
         for (brand in Brand.entries) {
             active.set(brand)
             ui.onNodeWithText("使用${brand.title}登录").performClick()
-            waitText("打开官方确认页")
+            waitText("打开${brand.title}确认")
             waitText("智能体${brand.name}")
             ui.onNodeWithText("群聊").assertDoesNotExist()
             ui.onNodeWithText("智能体${brand.name}").performClick()
@@ -117,16 +117,37 @@ class PlatformChatTest {
         assertEquals(Brand.entries.toList(), launched.toList())
     }
 
-    @Test fun browserReceivesTheOfficialApprovalUrlUnchanged() {
+    @Test fun loginOnlyOffersInstalledClients() {
+        val clients = androidx.compose.runtime.mutableStateOf(emptyList<Brand>())
+        val model = ui.runOnUiThread { ChatModel(app, ::api) }
+        ui.setContent { ChatScreen(model, clients.value, onCheckUpdate = {}) }
+        ui.onNodeWithText("请先安装或启用 Lark 或飞书，再返回小李登录。").assertExists()
+        for (available in listOf(emptyList(), listOf(Brand.LARK), listOf(Brand.FEISHU), Brand.entries)) {
+            ui.runOnIdle { clients.value = available }
+            for (brand in Brand.entries) {
+                val login = ui.onNodeWithText("使用${brand.title}登录")
+                if (brand in available) login.assertExists() else login.assertDoesNotExist()
+            }
+        }
+    }
+
+    @Test fun handoffTargetsTheSelectedClientAndPreservesTheOfficialUrl() {
         for (brand in Brand.entries) {
             val url = "https://open.${brand.domain}/page/launcher?user_code=A-B&extra=%2B%26%3D"
             val ticket = Approval(url, "A-B", true, "device", Long.MAX_VALUE, 1)
-            val intent = approvalIntent(brand, ticket)
-            assertEquals(android.content.Intent.ACTION_VIEW, intent.action)
-            assertEquals(url, intent.dataString)
-            assertTrue(intent.hasCategory(android.content.Intent.CATEGORY_BROWSABLE))
-            assertNull(intent.`package`)
-            assertEquals("https", intent.selector?.data?.scheme)
+            val client = approvalIntent(brand, ticket)
+            val link = requireNotNull(client.data)
+            assertEquals(android.content.Intent.ACTION_VIEW, client.action)
+            assertTrue(client.hasCategory(android.content.Intent.CATEGORY_BROWSABLE))
+            assertEquals(brand.clientPackage, client.`package`)
+            assertEquals(brand.appScheme, link.scheme)
+            assertEquals("applink.${brand.domain}", link.host)
+            assertEquals("/client/web_url/open", link.path)
+            assertEquals(url, link.getQueryParameter("url"))
+            assertNull(client.selector)
+            val supplied = "https://applink.${brand.domain}/client/example?extra=%2B%26"
+            val direct = approvalIntent(brand, ticket.copy(url = supplied))
+            assertEquals(supplied.replaceFirst("https:", "${brand.appScheme}:"), direct.dataString)
         }
     }
 
@@ -151,13 +172,20 @@ class PlatformChatTest {
         lateinit var model: ChatModel
         ui.activity.runOnUiThread { model = ChatModel(app, ::api) }
         val opened = java.util.concurrent.CopyOnWriteArrayList<String>()
-        ui.setContent { MaterialTheme { ChatScreen(model, onCheckUpdate = {}) { _, _, ticket -> opened.add(ticket.code) } } }
+        ui.setContent { MaterialTheme { ChatScreen(model, listOf(brand), onCheckUpdate = {}) { _, _, ticket ->
+            opened.add(ticket.code)
+            if (ticket.code == "OLD") throw android.content.ActivityNotFoundException()
+        } } }
         try {
             waitText("确认码  OLD")
             assertEquals(0, enrollments.get())
+            ui.onNodeWithText("打开Lark确认").performClick()
+            waitText("无法打开Lark，请确认客户端已启用并更新到最新版本。")
+            assertEquals(listOf("OLD"), opened.toList())
+            ui.onNodeWithText("用浏览器打开").assertDoesNotExist()
             ui.onNodeWithText("获取新链接").performClick()
             waitText("确认码  NEW")
-            ui.waitUntil(10000) { opened.toList() == listOf("NEW") }
+            ui.waitUntil(10000) { opened.toList() == listOf("OLD", "NEW") }
             assertEquals(1, enrollments.get())
             val saved = store.read(brand)
             assertEquals(keys, saved.keys)
